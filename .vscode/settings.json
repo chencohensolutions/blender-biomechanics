@@ -3,6 +3,52 @@
         "/^python -m compileall biomechanics_addon$/": {
             "approve": true,
             "matchCommandLine": true
-        }
-    }
+        },
+        "/^python -m compileall biomechanics_addon tools\\\\headless_train\\.py$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python -m compileall biomechanics_addon\\\\interaction\\.py$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python -m unittest tests\\.test_schemas -v$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python -m compileall biomechanics_addon tools tests$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python -m compileall -f biomechanics_addon tools tests; echo EXIT=\\$LASTEXITCODE$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python tools/check_neural_environment\\.py$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python -m unittest tests\\.test_sampling tests\\.test_schemas -v$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^powershell\\.exe -NoProfile -ExecutionPolicy Bypass -File tools\\\\run_training\\.ps1 -PackagePath \"C:\\\\Users\\\\henco\\\\AppData\\\\Local\\\\Temp\\\\biomech_export_dpc600jq\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python -m unittest tests\\.test_sampling tests\\.test_schemas -v 2>&1 \\| Select-Object -Last 10$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python -m compileall -f biomechanics_addon tools tests; python -m unittest discover -s tests -v 2>&1 \\| Select-Object -Last 40$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python -m unittest discover -s tests; Write-Host \"EXIT=\\$LASTEXITCODE\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "C:/src/blender-biomechanics/.venv/Scripts/python.exe": true
+    },
+    "python-envs.defaultEnvManager": "ms-python.python:system"
 }

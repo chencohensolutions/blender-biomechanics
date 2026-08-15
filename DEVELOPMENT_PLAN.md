@@ -181,6 +181,7 @@ order and unregister them in reverse order, preserving Blender add-on convention
 
 - `biomechanics_addon/__init__.py`: metadata and add-on lifecycle.
 - `biomechanics_addon/alignment.py`: pairing helpers and geometry math.
+- `biomechanics_addon/interaction.py`: target-driven constrained transforms.
 - `biomechanics_addon/operators.py`: alignment action and user-facing validation.
 - `biomechanics_addon/panels.py`: sidebar layout and control enabled states.
 - `biomechanics_addon/properties.py`: scene settings and reversible display state.
@@ -199,6 +200,11 @@ order and unregister them in reverse order, preserving Blender add-on convention
   `_biomechanics_previous_*` properties behind.
 - Transparent mode restores every viewport's prior solid color mode.
 - Wireframe and transparency are mutually exclusive for the comparison collection.
+- Constrained interaction accepts mesh objects from Rigid only.
+- Movement, collision, contact, and spring calculations use Rigid meshes; Original
+   remains alignment and comparison data.
+- User-facing linear measurements use millimeters and are converted through the
+   Blender scene unit scale for transform calculations.
 
 ## Current Scene Facts Used During Development
 
@@ -232,15 +238,18 @@ Run after changing alignment, properties, UI, or registration:
 
 ## Next Development Priorities
 
-1. Rename legacy `transparency` symbols to `comparison_display` in one semantics-aware
+1. Replace the prototype scalar pose limits with coupled SI joint limits and
+   collision/contact evaluation over the sacrum and both ilia in Rigid.
+2. Add the pubic-symphysis spring and solve movement of the opposite rigid ilium.
+3. Rename legacy `transparency` symbols to `comparison_display` in one semantics-aware
    refactor, preserving saved Blender property migration if needed.
-2. Move pairing into a dedicated function and expose clearer diagnostics for missing,
+4. Move pairing into a dedicated function and expose clearer diagnostics for missing,
    duplicate, or incompatible pairs.
-3. Add an optional panel status line showing the selected Original mesh and resolved
+5. Add an optional panel status line showing the selected Original mesh and resolved
    Rigid pair before alignment.
-4. Consider a lower-density wireframe visualization because anatomical meshes can be
+6. Consider a lower-density wireframe visualization because anatomical meshes can be
    very dense and visually dark in full `WIRE` mode.
-5. Add automated tests for pure name normalization and Kabsch math using Blender's
+7. Add automated tests for pure name normalization and Kabsch math using Blender's
    background test runner when a stable test harness is introduced.
 
 ## Known Constraints

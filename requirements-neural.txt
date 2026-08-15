@@ -1,0 +1,16 @@
+# Pinned dependencies for external neural constraint model training/export.
+#
+# Installed into a normal Python environment (venv/conda), NOT into Blender's
+# embedded Python. Blender only needs the much smaller `onnxruntime` CPU
+# package installed via tools/install_blender_onnxruntime.ps1.
+#
+# Verify with: python tools/check_neural_environment.py
+#
+# Pins re-verified 2026-08-15 against the workspace .venv (Python 3.13.7) -
+# the prior pins (torch 2.5.1 etc.) had no Python 3.13 wheels available.
+numpy==2.5.2
+torch==2.13.0
+onnx==1.22.0
+onnxruntime==1.28.0
+# Required by torch>=2.13's default (dynamo-based) torch.onnx.export path.
+onnxscript==0.7.1
