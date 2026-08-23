@@ -1,0 +1,9 @@
+# One-click resumable neural training
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\src\blender-biomechanics\tools\run_neural_training.ps1" -PackagePath "C:\src\blender-biomechanics\training"
+
+# External neural pipeline (run from the workspace .venv)
+& "C:\Program Files\WindowsApps\BlenderFoundation.Blender_5.2.0.0_x64__ppwjx1n5r4v9t\Blender\blender.exe" --background --factory-startup --python "C:\src\blender-biomechanics\tools\generate_neural_dataset.py" -- --package-dir "C:\src\blender-biomechanics\training"
+& "C:\src\blender-biomechanics\.venv\Scripts\python.exe" "C:\src\blender-biomechanics\tools\train_constraint_model.py" --package-dir "C:\src\blender-biomechanics\training"
+
+# Optional bounded active learning and final retraining
+& "C:\src\blender-biomechanics\.venv\Scripts\python.exe" "C:\src\blender-biomechanics\tools\active_learning_loop.py" --package-dir "C:\src\blender-biomechanics\training"

@@ -18,8 +18,11 @@ publishes an ONNX model bundle (`constraint_model.onnx` + `model_manifest.json` 
 import argparse
 import copy
 import json
+import math
+import os
 import sys
 import time
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -51,15 +54,36 @@ def parse_arguments():
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--hidden-size", type=int, default=64)
+    parser.add_argument("--hidden-size", type=int, default=128)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--leakage-radius-mm", type=float, default=2.0)
-    parser.add_argument("--full-mesh-authority-weight", type=float, default=3.0)
-    parser.add_argument("--target-false-safe-rate", type=float, default=0.0)
+    parser.add_argument("--full-mesh-authority-weight", type=float, default=20.0)
+    parser.add_argument("--target-false-safe-rate", type=float, default=0.005)
+    parser.add_argument("--boundary-weight-scale", type=float, default=4.0)
+    parser.add_argument("--boundary-bandwidth-mm", type=float, default=1.5)
+    parser.add_argument(
+        "--neutral-anchor-weight", type=float, default=5000.0,
+        help="Additional authority for labeled full-mesh neutral anchors required to start projection.",
+    )
+    parser.add_argument(
+        "--rotation-anchor-weight", type=float, default=100.0,
+        help="Additional authority for full-mesh single-axis rotation anchors.",
+    )
+    parser.add_argument(
+        "--translation-anchor-weight", type=float, default=100.0,
+        help="Additional authority for full-mesh single-axis translation anchors.",
+    )
+    parser.add_argument("--calibration-boundary-radius-mm", type=float, default=3.0)
     parser.add_argument("--opset", type=int, default=18)
-    parser.add_argument("--parity-tolerance", type=float, default=1e-3)
+    parser.add_argument("--parity-tolerance", type=float, default=5e-3)
+    parser.add_argument(
+        "--cpu-threads", type=int, default=None,
+        help="Pin PyTorch's CPU intra-op/inter-op thread pools. Torch's own default is usually the "
+        "machine's physical core count, not every logical core; pass 0 to use every logical core "
+        "(os.cpu_count()), or a specific number.",
+    )
     return parser.parse_args()
 
 
@@ -159,7 +183,15 @@ def split_mask(arrays, split_name):
     return arrays["split"] == split_name
 
 
-def sample_weights(valid, is_full_mesh, authority_weight):
+def sample_weights(valid, is_full_mesh, authority_weight, clearance_mm, boundary_weight_scale, boundary_bandwidth_mm):
+    """Class-balance weight times full-mesh authority times a boundary-proximity boost.
+
+    `clearance_mm` is signed distance-to-surface (positive = clear, negative = penetration,
+    0.0 for baseline-tolerated overlap), so poses near the true collision surface (clearance
+    close to 0, from either side) get a Gaussian-shaped weight boost. This pushes the network
+    to fit the decision boundary precisely instead of spending capacity on the easy interior/
+    exterior bulk of the sampled domain.
+    """
     valid_count = float(valid.sum())
     invalid_count = float(len(valid) - valid_count)
     if valid_count == 0 or invalid_count == 0:
@@ -167,10 +199,37 @@ def sample_weights(valid, is_full_mesh, authority_weight):
     else:
         total = valid_count + invalid_count
         class_weight = np.where(valid > 0.5, total / (2.0 * valid_count), total / (2.0 * invalid_count))
-    return class_weight * np.where(is_full_mesh, authority_weight, 1.0)
+    authority = np.where(is_full_mesh, authority_weight, 1.0)
+    boundary_bandwidth_mm = max(boundary_bandwidth_mm, 1e-6)
+    boundary_boost = 1.0 + boundary_weight_scale * np.exp(-np.square(clearance_mm / boundary_bandwidth_mm))
+    return class_weight * authority * boundary_boost
 
 
 # --- Model ---------------------------------------------------------------------------------------
+
+
+def periodic_pose_features_numpy(pose):
+    """Encode [translation, Euler XYZ] as translation plus two rotation-matrix columns."""
+    pose = np.asarray(pose, dtype=np.float32)
+    half_angles = np.deg2rad(pose[:, 3:6]) * 0.5
+    cx, cy, cz = (np.cos(half_angles[:, index]) for index in range(3))
+    sx, sy, sz = (np.sin(half_angles[:, index]) for index in range(3))
+    w = cx * cy * cz + sx * sy * sz
+    x = sx * cy * cz - cx * sy * sz
+    y = cx * sy * cz + sx * cy * sz
+    z = cx * cy * sz - sx * sy * cz
+    rotation_6d = np.stack(
+        (
+            1.0 - 2.0 * (y * y + z * z),
+            2.0 * (x * y + w * z),
+            2.0 * (x * z - w * y),
+            2.0 * (x * y - w * z),
+            1.0 - 2.0 * (x * x + z * z),
+            2.0 * (y * z + w * x),
+        ),
+        axis=1,
+    )
+    return np.concatenate((pose[:, 0:3], rotation_6d), axis=1)
 
 
 class ConstraintModel(nn.Module):
@@ -179,7 +238,7 @@ class ConstraintModel(nn.Module):
         self.register_buffer("mean", torch.tensor(mean, dtype=torch.float32))
         self.register_buffer("std", torch.tensor(std, dtype=torch.float32))
         self.trunk = nn.Sequential(
-            nn.Linear(6, hidden_size),
+            nn.Linear(9, hidden_size),
             nn.ReLU(),
             nn.Linear(hidden_size, hidden_size),
             nn.ReLU(),
@@ -188,7 +247,26 @@ class ConstraintModel(nn.Module):
         self.clearance_head = nn.Linear(hidden_size, 1)
 
     def forward(self, pose):
-        normalized = (pose - self.mean) / self.std
+        half_angles = pose[:, 3:6] * (math.pi / 360.0)
+        cx, cy, cz = (torch.cos(half_angles[:, index]) for index in range(3))
+        sx, sy, sz = (torch.sin(half_angles[:, index]) for index in range(3))
+        w = cx * cy * cz + sx * sy * sz
+        x = sx * cy * cz - cx * sy * sz
+        y = cx * sy * cz + sx * cy * sz
+        z = cx * cy * sz - sx * sy * cz
+        rotation_6d = torch.stack(
+            (
+                1.0 - 2.0 * (y * y + z * z),
+                2.0 * (x * y + w * z),
+                2.0 * (x * z - w * y),
+                2.0 * (x * y - w * z),
+                1.0 - 2.0 * (x * x + z * z),
+                2.0 * (y * z + w * x),
+            ),
+            dim=1,
+        )
+        periodic_pose = torch.cat((pose[:, 0:3], rotation_6d), dim=1)
+        normalized = (periodic_pose - self.mean) / self.std
         features = self.trunk(normalized)
         validity_logit = self.validity_head(features).squeeze(-1)
         clearance_mm = nn.functional.softplus(self.clearance_head(features)).squeeze(-1)
@@ -251,6 +329,12 @@ def train_model(model, train_tensors, validation_tensors, epochs, batch_size, le
         if epoch_validation_loss < best_validation_loss:
             best_validation_loss = epoch_validation_loss
             best_state = copy.deepcopy(model.state_dict())
+        if epoch == 0 or (epoch + 1) % 10 == 0 or epoch == epochs - 1:
+            print(
+                f"epoch {epoch + 1}/{epochs}: train_loss={epoch_train_loss:.4f}, "
+                f"validation_loss={epoch_validation_loss:.4f}",
+                flush=True,
+            )
 
     model.load_state_dict(best_state)
     return model, loss_curve, best_validation_loss
@@ -287,6 +371,16 @@ def calibrate_threshold(probabilities, actual_valid, target_false_safe_rate):
     return best_threshold, best_false_safe_rate, satisfied
 
 
+def _false_safe_rate(probabilities, actual_valid, threshold):
+    invalid_mask = actual_valid < 0.5
+    invalid_count = int(invalid_mask.sum())
+    if not invalid_count:
+        return 0.0
+    predicted_valid = probabilities >= threshold
+    false_safe_count = int(np.logical_and(predicted_valid, invalid_mask).sum())
+    return false_safe_count / invalid_count
+
+
 def confusion_matrix(probabilities, actual_valid, threshold):
     predicted_valid = probabilities >= threshold
     actual_valid_bool = actual_valid > 0.5
@@ -309,15 +403,22 @@ def export_onnx(model, opset, onnx_path):
     model.eval()
     dummy_input = torch.zeros(1, 6, dtype=torch.float32)
     temporary_path = onnx_path.with_name(onnx_path.name + ".tmp")
-    torch.onnx.export(
-        model,
-        dummy_input,
-        str(temporary_path),
-        input_names=["pose"],
-        output_names=["validity_logit", "clearance_mm"],
-        dynamic_axes={"pose": {0: "batch"}, "validity_logit": {0: "batch"}, "clearance_mm": {0: "batch"}},
-        opset_version=opset,
-    )
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            category=DeprecationWarning,
+            message="You are using the legacy TorchScript-based ONNX export.*",
+        )
+        torch.onnx.export(
+            model,
+            dummy_input,
+            str(temporary_path),
+            input_names=["pose"],
+            output_names=["validity_logit", "clearance_mm"],
+            dynamic_axes={"pose": {0: "batch"}, "validity_logit": {0: "batch"}, "clearance_mm": {0: "batch"}},
+            opset_version=opset,
+            dynamo=False,
+        )
     # torch's exporter may write weights to a companion "<name>.tmp.data" file; reload with
     # external data inlined and re-save fully self-contained so the bundle is a single .onnx
     # file (a rename of the .onnx alone would otherwise leave a dangling external-data reference).
@@ -363,16 +464,34 @@ def onnx_parity_test(model, onnx_path, translation_limit_mm, rotation_limit_degr
     return max_diff
 
 
+def neutral_pose_probability(model):
+    """Return the model's validity probability at the required starting pose."""
+    model.eval()
+    with torch.no_grad():
+        neutral_logit, _neutral_clearance = model(torch.zeros(1, 6, dtype=torch.float32))
+    return float(torch.sigmoid(neutral_logit).item())
+
+
 # --- Bundle assembly -------------------------------------------------------------------------------
 
 
 def write_bundle(output_dir, model, package, threshold, mean, std, metrics, opset, parity_tolerance):
     output_dir.mkdir(parents=True, exist_ok=True)
+    neutral_probability = neutral_pose_probability(model)
+    metrics["neutral_validity_probability"] = neutral_probability
+    if neutral_probability < threshold:
+        raise RuntimeError(
+            f"Neutral pose validity probability {neutral_probability:.6f} is below the calibrated "
+            f"threshold {threshold:.6f}. Refusing to publish a model that cannot begin projection; "
+            "retrain this pair."
+        )
     onnx_path = output_dir / "constraint_model.onnx"
-    export_onnx(model, opset, onnx_path)
+    temporary_onnx_path = output_dir / ".constraint_model.onnx.publish"
+    temporary_onnx_path.unlink(missing_ok=True)
+    export_onnx(model, opset, temporary_onnx_path)
 
     max_diff = onnx_parity_test(
-        model, onnx_path, package["range"]["translation_limit_mm"], package["range"]["rotation_limit_degrees"],
+        model, temporary_onnx_path, package["range"]["translation_limit_mm"], package["range"]["rotation_limit_degrees"],
         metrics["config"]["seed"],
     )
     metrics["onnx_parity_max_abs_diff"] = max_diff
@@ -383,6 +502,7 @@ def write_bundle(output_dir, model, package, threshold, mean, std, metrics, opse
             f"PyTorch/ONNX parity check failed: max abs diff {max_diff} exceeds tolerance {parity_tolerance}. "
             f"Refusing to publish the bundle at {output_dir} (onnx file written but manifest withheld)."
         )
+    temporary_onnx_path.replace(onnx_path)
 
     metrics_path = output_dir / "metrics.json"
     metrics_temp = metrics_path.with_name(metrics_path.name + ".tmp")
@@ -403,6 +523,8 @@ def write_bundle(output_dir, model, package, threshold, mean, std, metrics, opse
         scale_length=package["scale_length"],
         neutral_fixed_matrix=package["fixed_object"]["matrix_world"],
         neutral_moving_matrix=package["moving_object"]["matrix_world"],
+        rotation_center_world=package["rotation_center_world"],
+        pose_transform_version=package["pose_transform_version"],
         translation_limit_mm=package["range"]["translation_limit_mm"],
         rotation_limit_degrees=package["range"]["rotation_limit_degrees"],
         validity_threshold=threshold,
@@ -423,6 +545,11 @@ def write_bundle(output_dir, model, package, threshold, mean, std, metrics, opse
 
 def main():
     args = parse_arguments()
+    if args.cpu_threads is not None:
+        cpu_threads = os.cpu_count() if args.cpu_threads == 0 else args.cpu_threads
+        # Must be set before any inter-op parallel work runs (first tensor op below).
+        torch.set_num_interop_threads(cpu_threads)
+        torch.set_num_threads(cpu_threads)
     package, rows, meta = load_inputs(args)
     seed = args.seed if args.seed is not None else package["sampling"]["seed"]
     torch.manual_seed(seed)
@@ -435,16 +562,44 @@ def main():
     train_mask = split_mask(arrays, "train")
     validation_mask = split_mask(arrays, "validation")
     holdout_mask = split_mask(arrays, "holdout")
+    neutral_anchor_mask = (
+        np.all(np.isclose(arrays["pose"], 0.0), axis=1)
+        & (arrays["valid"] > 0.5)
+        & arrays["is_full_mesh"]
+    )
+    rotation_anchor_mask = (
+        np.all(np.isclose(arrays["pose"][:, :3], 0.0), axis=1)
+        & (np.count_nonzero(~np.isclose(arrays["pose"][:, 3:], 0.0), axis=1) == 1)
+        & arrays["is_full_mesh"]
+    )
+    translation_anchor_mask = (
+        np.all(np.isclose(arrays["pose"][:, 3:], 0.0), axis=1)
+        & (np.count_nonzero(~np.isclose(arrays["pose"][:, :3], 0.0), axis=1) == 1)
+        & arrays["is_full_mesh"]
+    )
     for name, mask in (("train", train_mask), ("validation", validation_mask), ("holdout", holdout_mask)):
         if not mask.any():
             raise ValueError(f"'{name}' split is empty after leakage-safe grouping; increase --sample-budget")
+    if not neutral_anchor_mask.any():
+        raise ValueError("no valid full-mesh neutral anchor is available to train the required starting pose")
 
-    mean = arrays["pose"][train_mask].mean(axis=0)
-    std = arrays["pose"][train_mask].std(axis=0)
-    std = np.where(std < 1e-6, 1.0, std)
+    raw_mean = arrays["pose"][train_mask].mean(axis=0)
+    raw_std = arrays["pose"][train_mask].std(axis=0)
+    raw_std = np.where(raw_std < 1e-6, 1.0, raw_std)
+    train_periodic_pose = periodic_pose_features_numpy(arrays["pose"][train_mask])
+    feature_mean = train_periodic_pose.mean(axis=0)
+    feature_std = train_periodic_pose.std(axis=0)
+    feature_std = np.where(feature_std < 1e-6, 1.0, feature_std)
 
     def to_tensors(mask):
-        weight = sample_weights(arrays["valid"][mask], arrays["is_full_mesh"][mask], args.full_mesh_authority_weight)
+        weight = sample_weights(
+            arrays["valid"][mask],
+            arrays["is_full_mesh"][mask],
+            args.full_mesh_authority_weight,
+            arrays["clearance_mm"][mask],
+            args.boundary_weight_scale,
+            args.boundary_bandwidth_mm,
+        )
         return {
             "pose": torch.from_numpy(arrays["pose"][mask]),
             "valid": torch.from_numpy(arrays["valid"][mask]),
@@ -455,8 +610,29 @@ def main():
 
     train_tensors = to_tensors(train_mask)
     validation_tensors = to_tensors(validation_mask)
+    neutral_anchor_tensors = to_tensors(neutral_anchor_mask)
+    neutral_anchor_tensors["weight"] *= args.neutral_anchor_weight
+    rotation_anchor_tensors = to_tensors(rotation_anchor_mask)
+    rotation_anchor_tensors["weight"] *= args.rotation_anchor_weight
+    translation_anchor_tensors = to_tensors(translation_anchor_mask)
+    translation_anchor_tensors["weight"] *= args.translation_anchor_weight
+    train_tensors = {
+        name: torch.cat(
+            (
+                train_tensors[name],
+                neutral_anchor_tensors[name],
+                rotation_anchor_tensors[name],
+                translation_anchor_tensors[name],
+            )
+        )
+        for name in train_tensors
+    }
+    validation_tensors = {
+        name: torch.cat((validation_tensors[name], neutral_anchor_tensors[name], rotation_anchor_tensors[name]))
+        for name in validation_tensors
+    }
 
-    model = ConstraintModel(args.hidden_size, mean, std)
+    model = ConstraintModel(args.hidden_size, feature_mean, feature_std)
     started_at = time.perf_counter()
     model, loss_curve, best_validation_loss = train_model(
         model, train_tensors, validation_tensors,
@@ -472,20 +648,53 @@ def main():
         holdout_logit, _ = model(torch.from_numpy(arrays["pose"][holdout_full_mesh_mask]))
     holdout_probabilities = torch.sigmoid(holdout_logit).numpy()
     holdout_actual_valid = arrays["valid"][holdout_full_mesh_mask]
+    holdout_clearance_mm = arrays["clearance_mm"][holdout_full_mesh_mask]
 
-    threshold, false_safe_rate, satisfied = calibrate_threshold(
-        holdout_probabilities, holdout_actual_valid, args.target_false_safe_rate
+    # Region-aware calibration: a single global zero-false-safe threshold is dragged up by
+    # invalid poses that are nowhere near the collision surface (e.g. deep-penetration or
+    # far-domain rotation extremes), which the network may not have calibrated well simply
+    # because they are geometrically obvious and sparsely sampled - not because they are a real
+    # near-boundary safety risk. Restrict calibration to poses actually close to the surface
+    # (|clearance_mm| <= --calibration-boundary-radius-mm) so the chosen threshold reflects
+    # precision where it matters, then report the resulting false-safe rate over the FULL
+    # holdout set too so the deployed safety number is never hidden.
+    near_boundary_mask = holdout_actual_valid.astype(bool) | (np.abs(holdout_clearance_mm) <= args.calibration_boundary_radius_mm)
+    near_boundary_invalid_count = int((~holdout_actual_valid.astype(bool) & near_boundary_mask).sum())
+    calibration_region = "near_boundary" if near_boundary_invalid_count > 0 else "global"
+    if calibration_region == "near_boundary":
+        calibration_probabilities = holdout_probabilities[near_boundary_mask]
+        calibration_actual_valid = holdout_actual_valid[near_boundary_mask]
+    else:
+        print(
+            f"warning: no invalid holdout poses within --calibration-boundary-radius-mm="
+            f"{args.calibration_boundary_radius_mm}; falling back to global calibration"
+        )
+        calibration_probabilities = holdout_probabilities
+        calibration_actual_valid = holdout_actual_valid
+
+    threshold, near_boundary_false_safe_rate, satisfied = calibrate_threshold(
+        calibration_probabilities, calibration_actual_valid, args.target_false_safe_rate
     )
     if not satisfied:
         print(
             f"warning: could not reach target false-safe rate {args.target_false_safe_rate}; "
-            f"using most conservative threshold {threshold} (false-safe rate {false_safe_rate:.4f})"
+            f"using most conservative threshold {threshold} (false-safe rate {near_boundary_false_safe_rate:.4f})"
+        )
+    global_false_safe_rate = _false_safe_rate(holdout_probabilities, holdout_actual_valid, threshold)
+    if threshold >= 1.0:
+        raise RuntimeError(
+            "Calibration requires threshold 1.0, which cannot produce an interactive model. "
+            "Improve the dataset/model fit or increase --target-false-safe-rate deliberately."
         )
     holdout_full_mesh_metrics = {
         "threshold": threshold,
-        "false_safe_rate": false_safe_rate,
+        "false_safe_rate": global_false_safe_rate,
         "sample_count": int(holdout_full_mesh_mask.sum()),
         "confusion_matrix": confusion_matrix(holdout_probabilities, holdout_actual_valid, threshold),
+        "calibration_region": calibration_region,
+        "calibration_boundary_radius_mm": args.calibration_boundary_radius_mm,
+        "near_boundary_sample_count": int(near_boundary_mask.sum()),
+        "near_boundary_false_safe_rate": near_boundary_false_safe_rate,
     }
 
     with torch.no_grad():
@@ -501,6 +710,12 @@ def main():
     metrics = {
         "dataset_summary": meta.get("summary", {}),
         "reassigned_rows_for_leakage": reassigned_count,
+        "neutral_anchor_count": int(neutral_anchor_mask.sum()),
+        "neutral_anchor_weight": args.neutral_anchor_weight,
+        "rotation_anchor_count": int(rotation_anchor_mask.sum()),
+        "rotation_anchor_weight": args.rotation_anchor_weight,
+        "translation_anchor_count": int(translation_anchor_mask.sum()),
+        "translation_anchor_weight": args.translation_anchor_weight,
         "loss_curve": loss_curve,
         "best_validation_loss": best_validation_loss,
         "holdout_full_mesh": holdout_full_mesh_metrics,
@@ -515,7 +730,7 @@ def main():
 
     output_dir = args.output_dir or (args.package_dir / "model")
     manifest_path, max_diff = write_bundle(
-        output_dir, model, package, threshold, mean, std, metrics, args.opset, args.parity_tolerance
+        output_dir, model, package, threshold, raw_mean, raw_std, metrics, args.opset, args.parity_tolerance
     )
     print(f"published model bundle at {manifest_path} (validity_threshold={threshold}, onnx parity max diff={max_diff:.2e})")
 

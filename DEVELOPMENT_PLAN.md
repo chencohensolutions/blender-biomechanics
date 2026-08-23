@@ -181,11 +181,109 @@ order and unregister them in reverse order, preserving Blender add-on convention
 
 - `biomechanics_addon/__init__.py`: metadata and add-on lifecycle.
 - `biomechanics_addon/alignment.py`: pairing helpers and geometry math.
+- `biomechanics_addon/dataset_io.py`: bpy-free chunked NPZ dataset serialization.
 - `biomechanics_addon/interaction.py`: target-driven constrained transforms.
+- `biomechanics_addon/neural_geometry.py`: evaluated mesh geometry and neural pose-labeling helpers.
+- `biomechanics_addon/neural_constraints.py`: model loading, cached ONNX sessions,
+   prediction, pose metrics, interpolation, and conservative path projection.
+- `biomechanics_addon/neural_training.py`: bpy-free command, status, and process helpers
+   for the external training orchestrator.
 - `biomechanics_addon/operators.py`: alignment action and user-facing validation.
 - `biomechanics_addon/panels.py`: sidebar layout and control enabled states.
 - `biomechanics_addon/properties.py`: scene settings and reversible display state.
+- `biomechanics_addon/sampling.py`: bpy-free deterministic pose sampling helpers.
+- `biomechanics_addon/schemas.py`: bpy-free package, dataset, and model contracts.
+- `tools/generate_neural_dataset.py`: background-Blender geometric labeling.
+- `tools/train_constraint_model.py`: external PyTorch training and ONNX export.
+- `tools/active_learning_loop.py`: bounded full-mesh active-learning rounds.
+- `tools/run_neural_training.ps1`: resumable dataset, training, and active-learning orchestration.
 - `tools/dev_load.py`: clean package/submodule reload during Blender development.
+
+## External Neural Constraint Pipeline
+
+The current neural milestone trains a geometric feasibility model for one fixed and
+one moving Rigid mesh. The verified development pair is fixed `sacrum`, moving `L5`.
+It is not an anatomical-stability, loading, ligament, cartilage, or pain model.
+
+### Artifacts and schemas
+
+- Package schema v2 records object names, neutral matrices, scene scale, per-axis
+   ranges, deterministic seed, proxy/full-mesh settings, and geometry fingerprints.
+- Dataset schema v1 stores raw local 6-DOF poses in millimeters/degrees, validity,
+   clearance/overlap measurements, label provenance, split, and group id.
+- Model manifest schema v1 records normalization, model I/O, fingerprints, neutral
+   transforms, scene scale, calibrated validity threshold, metrics, and ranges.
+- External tools must load bpy-free add-on modules through `tools/_addon_import.py`;
+   importing `biomechanics_addon` directly outside Blender executes `__init__.py` and
+   requires `bpy`.
+
+### Training workflow
+
+1. In Blender, choose fixed/moving Rigid meshes and export package v2.
+2. Run `tools/generate_neural_dataset.py` in background Blender. It creates
+    deterministic anchors/LHS/balancing/refinement stages, checkpoints each stage,
+    and uses full geometry for holdout and final boundary labels.
+3. Run `tools/train_constraint_model.py` with the workspace `.venv`. It performs
+    leakage-safe split grouping, train-only normalization, weighted two-head MLP
+    training, conservative holdout-threshold calibration, ONNX export, and
+    PyTorch/ONNX Runtime parity validation.
+4. Optionally run `tools/active_learning_loop.py` for bounded uncertain-pose
+    full-mesh labeling and retraining.
+5. Import `model_manifest.json` in Blender. Activation rejects wrong object names,
+    fingerprints, scene scale, fixed transform, missing ONNX, invalid model I/O, or
+    unavailable ONNX Runtime without replacing the last known-good model.
+6. Alternatively, use **Geometric Dataset > Start One-Click Neural Training**. It
+   refreshes the package with the standard +/-10 mm / full-circle rotation domain,
+   launches `tools/run_neural_training.ps1` outside Blender's UI thread, and polls
+   its atomic status file. The script resumes dataset checkpoints and never treats
+   an incomplete model bundle as publishable.
+
+The translation domain defaults to +/-10 mm. **Limit Rotation Domain** defaults off,
+which selects full-circle training; enabling it exposes a per-axis degree limit for
+smaller anatomical neighborhoods. Full-circle training uses an Euler input
+domain of -180 to +180 degrees on every local axis (360 degrees total), but the network
+internally converts orientation to the first two rotation-matrix columns. This 6D
+orientation representation makes equivalent Euler descriptions and the -180/+180 seam
+continuous. Dataset generation combines full-domain, regional (+/-45 degree), and local
+(+/-10 degree) Latin-hypercube tiers, plus authoritative full-mesh single-axis sweeps;
+the one-click full-circle base budget defaults to 10,000 poses. Pose path distance is
+translation magnitude plus quaternion rotation angle multiplied by the stored 50 mm
+joint radius. Conservative projection bisects the first invalid path interval to a
+combined distance of at most 0.5 mm. This is an empirical model resolution target, not
+an exact collision guarantee.
+
+### Blender inference behavior
+
+- Whole-pose interaction converts the requested target transform to trained
+   neutral-local `[tx, ty, tz, rx, ry, rz]` coordinates.
+- In-range predicted-valid requests are accepted. Invalid requests are projected
+   from the last accepted pose toward the target using linear translation,
+   shortest-path quaternion slerp, a first-invalid scan, and conservative bisection.
+- The target Empty remains at the requested pose; the moving mesh uses the accepted
+   or projected pose. Explicit attached followers move afterward and do not affect
+   model validity.
+- Out-of-range requests and active-model projection failures hold the current pose.
+- With no compatible active neural model, whole-pose interaction follows the target
+   without translation or rotation limits.
+- `Validate Current Pose` performs an authoritative full-mesh check on demand and
+   reports validity, clearance, and overlap-pair count. Interactive predictions are
+   not presented as exact collision proofs.
+- The neural panel currently displays model path/source, compatibility errors,
+   prediction confidence, predicted clearance, and whether projection occurred.
+
+### Current Phase 4 validation state
+
+- Host tests cover conservative projection, out-of-range rejection, and quaternion
+   rotational contribution to the pose metric.
+- A live sacrum/L5 exact full-mesh validation returned valid with approximately
+   0.74 mm clearance and zero overlap pairs.
+- Source reload and operator registration have been verified. The full host suite
+   now has 41 tests, and `compileall` is clean after the one-click orchestration
+   and panel split implementation.
+- Still required before declaring Phase 4 complete: profile live inference, exercise
+   mixed translation/rotation paths and disconnected-valid-region behavior, confirm
+   target-versus-constrained movement, and exact-check neutral/interior/projected/
+   intentionally-invalid/random trajectory poses.
 
 ## Invariants
 
@@ -236,21 +334,38 @@ Run after changing alignment, properties, UI, or registration:
 12. Confirm None and add-on unload restore all object and viewport state.
 13. Confirm no object retains a `_biomechanics_previous_*` custom property.
 
-## Next Development Priorities
+## Next Session
 
-1. Replace the prototype scalar pose limits with coupled SI joint limits and
-   collision/contact evaluation over the sacrum and both ilia in Rigid.
-2. Add the pubic-symphysis spring and solve movement of the opposite rigid ilium.
-3. Rename legacy `transparency` symbols to `comparison_display` in one semantics-aware
-   refactor, preserving saved Blender property migration if needed.
-4. Move pairing into a dedicated function and expose clearer diagnostics for missing,
-   duplicate, or incompatible pairs.
-5. Add an optional panel status line showing the selected Original mesh and resolved
-   Rigid pair before alignment.
-6. Consider a lower-density wireframe visualization because anatomical meshes can be
-   very dense and visually dark in full `WIRE` mode.
-7. Add automated tests for pure name normalization and Kabsch math using Blender's
-   background test runner when a stable test harness is introduced.
+The external neural feature is implemented through Phase 4 steps 12-16, pending the
+runtime acceptance checks above. Continue in this order:
+
+1. Fix the live-solve performance boundary. `_neural_constrained_matrix()` currently
+   calls `load_and_check_model()` on every dependency-graph update; that recomputes
+   full geometry fingerprints before each prediction. Cache the validated manifest,
+   ONNX path/session, compatibility result, and last accepted pose when the model is
+   imported or first used. Invalidate that cache on model change, clear, unregister,
+   and relevant fixed/moving-object changes. Keep per-update work to transform
+   conversion, ONNX inference, and projection.
+2. Add focused tests for cache invalidation and conservative projection across a
+   disconnected valid region, then run the host suite and `compileall`.
+3. Run the remaining Phase 4 live checks listed above. Record model disagreements;
+   fix calibration/data rather than special-casing individual poses.
+4. Exercise the one-click workflow live with the real sacrum/L5 package: verify
+   duplicate-launch prevention, timer status updates, resume after interruption,
+   exact nonzero exit propagation, and that a failed run preserves the active model.
+5. Update `tools/install_blender_onnxruntime.ps1`: its `onnxruntime==1.20.1` pin has
+   no Python 3.13 wheel. Blender 5.2/Python 3.13 was live-tested successfully with
+   `onnxruntime==1.28.0`. Also account for Microsoft Store Blender, whose protected
+   embedded `python.exe` cannot be launched directly from PowerShell.
+
+The Phase 4 work is not committed. At handoff, the working tree includes changes to
+`biomechanics_addon/__init__.py`, `interaction.py`, `neural_constraints.py`,
+`operators.py`, and `panels.py`, plus new `tests/test_neural_constraints.py` and an
+unrelated modified `.vscode/settings.json`. Do not reset or clean these files.
+
+After the neural milestone is complete, return to the deferred pelvic work: coupled
+SI limits over sacrum/both ilia, pubic-symphysis spring response, and opposite-ilium
+movement. The comparison-display rename and pairing diagnostics also remain deferred.
 
 ## Known Constraints
 

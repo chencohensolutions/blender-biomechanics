@@ -42,6 +42,12 @@ class PackageV2Test(unittest.TestCase):
         validated = schemas.validate_package_v2(package)
         self.assertEqual(validated["package_version"], schemas.PACKAGE_SCHEMA_VERSION)
         self.assertEqual(validated["range"]["joint_radius_mm"], schemas.JOINT_RADIUS_MM)
+        self.assertEqual(validated["rotation_center_world"], [0.0, 0.0, 0.0])
+        self.assertEqual(validated["pose_transform_version"], 2)
+
+    def test_preserves_explicit_rotation_center(self):
+        package = self._build(rotation_center_world=[1.0, 2.0, 3.0])
+        self.assertEqual(schemas.validate_package_v2(package)["rotation_center_world"], [1.0, 2.0, 3.0])
 
     def test_rejects_identical_objects(self):
         with self.assertRaises(schemas.SchemaError):
@@ -122,10 +128,20 @@ class ModelManifestTest(unittest.TestCase):
         manifest = self._build()
         validated = schemas.validate_model_manifest(manifest)
         self.assertEqual(validated["output_names"]["validity_logit"], "validity_logit")
+        self.assertEqual(validated["rotation_center_world"], [3, 7, 11])
+        self.assertEqual(validated["pose_transform_version"], 2)
+
+    def test_preserves_explicit_rotation_center(self):
+        manifest = self._build(rotation_center_world=[1.0, 2.0, 3.0])
+        self.assertEqual(schemas.validate_model_manifest(manifest)["rotation_center_world"], [1.0, 2.0, 3.0])
 
     def test_rejects_bad_threshold(self):
         with self.assertRaises(schemas.SchemaError):
             self._build(validity_threshold=1.5)
+
+    def test_accepts_conservative_threshold_boundary(self):
+        manifest = self._build(validity_threshold=1.0)
+        self.assertEqual(schemas.validate_model_manifest(manifest)["validity_threshold"], 1.0)
 
     def test_check_model_compatibility_detects_mismatch(self):
         manifest = self._build()

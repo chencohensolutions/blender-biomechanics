@@ -4,7 +4,7 @@ import importlib
 from pathlib import Path
 import sys
 
-import addon_utils
+import addon_utils  # pyright: ignore[reportMissingImports]
 
 
 ADDON_NAME = "biomechanics_addon"

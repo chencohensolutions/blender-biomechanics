@@ -1,7 +1,5 @@
-import bpy
-import json
+import bpy  # pyright: ignore[reportMissingImports]
 import math
-
 from .alignment import base_object_name
 
 
@@ -10,6 +8,14 @@ PREVIOUS_TRANSPARENCY_KEY = "_biomechanics_previous_transparency"
 PREVIOUS_IN_FRONT_KEY = "_biomechanics_previous_in_front"
 PREVIOUS_DISPLAY_TYPE_KEY = "_biomechanics_previous_display_type"
 _previous_viewport_color_modes = {}
+
+
+class BIOMECHANICS_PG_neural_model_entry(bpy.types.PropertyGroup):
+    """One published neural bundle, identified by its directed bone pair."""
+
+    manifest_path: bpy.props.StringProperty(subtype="FILE_PATH")  # pyright: ignore[reportInvalidTypeForm]
+    fixed_object_name: bpy.props.StringProperty()  # pyright: ignore[reportInvalidTypeForm]
+    moving_object_name: bpy.props.StringProperty()  # pyright: ignore[reportInvalidTypeForm]
 
 
 def _view_3d_spaces():
@@ -107,30 +113,6 @@ def _update_transparency_overlay(scene, context):
     refresh_transparency_overlay(scene, excluded_pair_name)
 
 
-def _update_training_result(scene, _context):
-    text = scene.biomechanics_training_result_text
-    rigid_collection = scene.biomechanics_target_collection
-    if text is None or rigid_collection is None:
-        return
-    try:
-        result = json.loads(text.as_string())
-    except (TypeError, ValueError, json.JSONDecodeError):
-        scene.biomechanics_training_summary = "Selected training data is invalid"
-        return
-
-    fixed_object = rigid_collection.objects.get(result.get("fixed_object", ""))
-    moving_object = rigid_collection.objects.get(result.get("moving_object", ""))
-    if fixed_object is not None and fixed_object.type == "MESH":
-        scene.biomechanics_training_fixed_object = fixed_object
-    if moving_object is not None and moving_object.type == "MESH":
-        scene.biomechanics_training_moving_object = moving_object
-    summary = result.get("summary", {})
-    if "valid_samples" in summary and "total_samples" in summary:
-        scene.biomechanics_training_summary = (
-            f'{summary["valid_samples"]} valid / {summary["total_samples"]} samples'
-        )
-
-
 def register_properties():
     bpy.types.Scene.biomechanics_training_fixed_object = bpy.props.PointerProperty(
         name="Fixed Bone",
@@ -142,76 +124,45 @@ def register_properties():
         description="Rigid mesh sampled around its neutral pose",
         type=bpy.types.Object,
     )
-    bpy.types.Scene.biomechanics_training_translation_mm = bpy.props.FloatProperty(
-        name="Translation Range (mm)",
-        description="Sample from minus to plus this local translation on each axis",
-        min=0.0,
-        default=3.0,
-        precision=2,
-    )
-    bpy.types.Scene.biomechanics_training_rotation = bpy.props.FloatProperty(
-        name="Rotation Range",
-        description="Sample from minus to plus this local rotation on each axis",
-        subtype="ANGLE",
-        min=0.0,
-        max=math.pi,
-        default=math.radians(3.0),
-    )
-    bpy.types.Scene.biomechanics_training_translation_steps = bpy.props.IntProperty(
-        name="Translation Steps",
-        description="Samples per translation axis",
-        min=1,
-        max=7,
-        default=3,
-    )
-    bpy.types.Scene.biomechanics_training_rotation_steps = bpy.props.IntProperty(
-        name="Rotation Steps",
-        description="Samples per rotation axis",
-        min=1,
-        max=7,
-        default=3,
-    )
-    bpy.types.Scene.biomechanics_training_clearance_mm = bpy.props.FloatProperty(
-        name="Minimum Clearance (mm)",
-        description="Reject non-colliding poses closer than this surface clearance",
-        min=0.0,
-        default=0.0,
-        precision=3,
-    )
-    bpy.types.Scene.biomechanics_training_proxy_faces = bpy.props.IntProperty(
-        name="Proxy Faces",
-        description="Maximum faces per temporary collision proxy",
-        min=250,
-        max=20000,
-        default=2000,
-    )
-    bpy.types.Scene.biomechanics_training_maximum_samples = bpy.props.IntProperty(
-        name="Maximum Samples",
-        description="Reject training workloads above this hard sample limit",
-        min=1,
-        max=1000000,
-        default=20000,
-    )
     bpy.types.Scene.biomechanics_training_seed = bpy.props.IntProperty(
         name="Sampling Seed",
         description="Deterministic seed recorded in the exported package for background dataset sampling",
         min=0,
         default=12345,
     )
+    bpy.types.Scene.biomechanics_training_rotation_center = bpy.props.FloatVectorProperty(
+        name="Training Rotation Center",
+        description="World-space point used as the rotation center for generated training poses",
+        size=3,
+        subtype="TRANSLATION",
+        precision=6,
+    )
+    bpy.types.Scene.biomechanics_neural_translation_domain_mm = bpy.props.FloatProperty(
+        name="Translation Domain (mm)",
+        description="Maximum sampled local translation from neutral on each axis",
+        min=0.001,
+        max=1000.0,
+        default=10.0,
+        precision=2,
+    )
+    bpy.types.Scene.biomechanics_neural_rotation_domain_degrees = bpy.props.FloatProperty(
+        name="Rotation Limit (degrees)",
+        description="Maximum sampled local rotation from neutral on each axis when domain limiting is enabled",
+        min=0.001,
+        max=180.0,
+        default=10.0,
+        precision=2,
+    )
+    bpy.types.Scene.biomechanics_neural_limit_rotation_domain = bpy.props.BoolProperty(
+        name="Limit Rotation Domain",
+        description="Restrict training to a smaller angular neighborhood; disabled maps the full 360-degree orientation space",
+        default=False,
+    )
     bpy.types.Scene.biomechanics_training_export_directory = bpy.props.StringProperty(
         name="Training Folder",
         description="Folder for terminal training inputs and results",
         subtype="DIR_PATH",
         default="//biomechanics_training",
-    )
-    bpy.types.Scene.biomechanics_training_result_text = bpy.props.PointerProperty(
-        name="Training Data",
-        type=bpy.types.Text,
-        update=_update_training_result,
-    )
-    bpy.types.Scene.biomechanics_training_summary = bpy.props.StringProperty(
-        name="Training Summary",
-        options={"HIDDEN"},
     )
     bpy.types.Scene.biomechanics_onnx_status = bpy.props.StringProperty(
         name="Neural Model Status",
@@ -224,10 +175,60 @@ def register_properties():
         subtype="FILE_PATH",
         options={"HIDDEN"},
     )
+    bpy.types.Scene.biomechanics_neural_models = bpy.props.CollectionProperty(
+        type=BIOMECHANICS_PG_neural_model_entry,
+    )
     bpy.types.Scene.biomechanics_neural_model_status = bpy.props.StringProperty(
         name="Neural Model Import Status",
         description="Result of the last neural model import/compatibility check",
         options={"HIDDEN"},
+    )
+    bpy.types.Scene.biomechanics_neural_training_status = bpy.props.StringProperty(
+        name="Neural Training Status",
+        description="Current status of the external neural-training pipeline",
+        options={"HIDDEN"},
+    )
+    bpy.types.Scene.biomechanics_neural_training_pair = bpy.props.StringProperty(
+        name="Neural Training Pair",
+        description="Fixed and moving bone pair for the current or most recent neural-training run",
+        options={"HIDDEN"},
+    )
+    bpy.types.Scene.biomechanics_neural_training_status_path = bpy.props.StringProperty(
+        name="Neural Training Status File",
+        description="Atomic status file written by the external training pipeline",
+        subtype="FILE_PATH",
+        options={"HIDDEN"},
+    )
+    bpy.types.Scene.biomechanics_neural_training_active = bpy.props.BoolProperty(
+        name="Neural Training Active",
+        description="Whether an external neural-training process is currently running",
+        options={"HIDDEN"},
+    )
+    bpy.types.Scene.biomechanics_neural_training_sample_budget = bpy.props.IntProperty(
+        name="Base Sample Budget",
+        description="Total hierarchical samples before balancing and active learning",
+        min=1000,
+        max=100000,
+        default=10000,
+    )
+    bpy.types.Scene.biomechanics_neural_training_active_learning = bpy.props.BoolProperty(
+        name="Active Learning",
+        description="Run bounded uncertain-pose labeling and retraining after the baseline model",
+        default=False,
+    )
+    bpy.types.Scene.biomechanics_neural_training_active_rounds = bpy.props.IntProperty(
+        name="Active-Learning Rounds",
+        description="Maximum number of bounded active-learning rounds",
+        min=1,
+        max=50,
+        default=5,
+    )
+    bpy.types.Scene.biomechanics_neural_training_max_new_samples = bpy.props.IntProperty(
+        name="Active-Learning Samples",
+        description="Maximum total new full-mesh labels requested by active learning",
+        min=1,
+        max=10000,
+        default=300,
     )
     bpy.types.Scene.biomechanics_manipulated_object = bpy.props.PointerProperty(
         name="Manipulated Bone",
@@ -250,15 +251,15 @@ def register_properties():
         options={"HIDDEN"},
     )
     bpy.types.Scene.biomechanics_translation_limit_mm = bpy.props.FloatProperty(
-        name="Translation Limit (mm)",
-        description="Maximum local translation from the neutral pose on each axis, in millimeters",
+        name="Fallback Translation Limit (mm)",
+        description="Maximum local translation per axis when no usable neural projection is available",
         min=0.0,
         default=5.0,
         precision=2,
     )
     bpy.types.Scene.biomechanics_rotation_limit = bpy.props.FloatProperty(
-        name="Rotation Limit",
-        description="Maximum total rotation from the neutral pose",
+        name="Fallback Rotation Limit",
+        description="Maximum total rotation when no usable neural projection is available",
         subtype="ANGLE",
         min=0.0,
         max=math.pi,
@@ -318,6 +319,8 @@ def register_properties():
     )
 
     for scene in bpy.data.scenes:
+        if not scene.is_property_set("biomechanics_training_rotation_center"):
+            scene.biomechanics_training_rotation_center = scene.cursor.location
         if "biomechanics_rigid_transparent" in scene:
             del scene["biomechanics_rigid_transparent"]
         if scene.biomechanics_source_collection is None:
@@ -326,24 +329,6 @@ def register_properties():
             scene.biomechanics_target_collection = bpy.data.collections.get("rigid")
         rigid_collection = scene.biomechanics_target_collection
         if rigid_collection is not None:
-            result_text = scene.biomechanics_training_result_text
-            if result_text is not None:
-                try:
-                    training_result = json.loads(result_text.as_string())
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    training_result = {}
-                saved_fixed = rigid_collection.objects.get(
-                    training_result.get("fixed_object", "")
-                )
-                saved_moving = rigid_collection.objects.get(
-                    training_result.get("moving_object", "")
-                )
-                if saved_fixed is not None and saved_fixed.type == "MESH":
-                    scene.biomechanics_training_fixed_object = saved_fixed
-                if saved_moving is not None and saved_moving.type == "MESH":
-                    scene.biomechanics_training_moving_object = saved_moving
-            else:
-                scene.biomechanics_training_moving_object = None
             if scene.biomechanics_training_fixed_object is None:
                 scene.biomechanics_training_fixed_object = next(
                     (
@@ -358,7 +343,16 @@ def register_properties():
 
 def unregister_properties():
     _restore_transparency_overlay()
+    del bpy.types.Scene.biomechanics_neural_training_sample_budget
+    del bpy.types.Scene.biomechanics_neural_training_max_new_samples
+    del bpy.types.Scene.biomechanics_neural_training_active_rounds
+    del bpy.types.Scene.biomechanics_neural_training_active_learning
+    del bpy.types.Scene.biomechanics_neural_training_active
+    del bpy.types.Scene.biomechanics_neural_training_status_path
+    del bpy.types.Scene.biomechanics_neural_training_pair
+    del bpy.types.Scene.biomechanics_neural_training_status
     del bpy.types.Scene.biomechanics_neural_model_status
+    del bpy.types.Scene.biomechanics_neural_models
     del bpy.types.Scene.biomechanics_neural_model_path
     del bpy.types.Scene.biomechanics_onnx_status
     del bpy.types.Scene.biomechanics_overlay_on_top
@@ -374,16 +368,11 @@ def unregister_properties():
     del bpy.types.Scene.biomechanics_neutral_matrix
     del bpy.types.Scene.biomechanics_pose_target
     del bpy.types.Scene.biomechanics_manipulated_object
-    del bpy.types.Scene.biomechanics_training_summary
-    del bpy.types.Scene.biomechanics_training_result_text
     del bpy.types.Scene.biomechanics_training_export_directory
+    del bpy.types.Scene.biomechanics_neural_limit_rotation_domain
+    del bpy.types.Scene.biomechanics_neural_rotation_domain_degrees
+    del bpy.types.Scene.biomechanics_neural_translation_domain_mm
+    del bpy.types.Scene.biomechanics_training_rotation_center
     del bpy.types.Scene.biomechanics_training_seed
-    del bpy.types.Scene.biomechanics_training_maximum_samples
-    del bpy.types.Scene.biomechanics_training_proxy_faces
-    del bpy.types.Scene.biomechanics_training_clearance_mm
-    del bpy.types.Scene.biomechanics_training_rotation_steps
-    del bpy.types.Scene.biomechanics_training_translation_steps
-    del bpy.types.Scene.biomechanics_training_rotation
-    del bpy.types.Scene.biomechanics_training_translation_mm
     del bpy.types.Scene.biomechanics_training_moving_object
     del bpy.types.Scene.biomechanics_training_fixed_object

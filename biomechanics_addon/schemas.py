@@ -89,6 +89,8 @@ def build_package_v2(
     proxy_max_faces,
     use_full_mesh_for_holdout=True,
     joint_radius_mm=JOINT_RADIUS_MM,
+    rotation_center_world=None,
+    pose_transform_version=2,
 ):
     errors = []
     _require(fixed_object_name != moving_object_name, "fixed_object and moving_object must differ", errors)
@@ -98,6 +100,8 @@ def build_package_v2(
     _require(translation_limit_mm > 0, "translation_limit_mm must be positive", errors)
     _require(rotation_limit_degrees > 0, "rotation_limit_degrees must be positive", errors)
     _require(joint_radius_mm > 0, "joint_radius_mm must be positive", errors)
+    if rotation_center_world is not None:
+        _require(len(rotation_center_world) == 3, "rotation_center_world must have 3 values", errors)
     _raise_if_errors(errors)
 
     return {
@@ -114,6 +118,12 @@ def build_package_v2(
             "fingerprint": moving_fingerprint,
         },
         "scale_length": scale_length,
+        "pose_transform_version": pose_transform_version,
+        "rotation_center_world": list(
+            rotation_center_world
+            if rotation_center_world is not None
+            else (neutral_moving_matrix[3], neutral_moving_matrix[7], neutral_moving_matrix[11])
+        ),
         "range": {
             "translation_limit_mm": translation_limit_mm,
             "rotation_limit_degrees": rotation_limit_degrees,
@@ -165,6 +175,16 @@ def validate_package_v2(data):
     for key in ("translation_limit_mm", "rotation_limit_degrees", "joint_radius_mm"):
         _require(key in range_block, f"range.{key} is required", errors)
 
+    _raise_if_errors(errors)
+
+    # Packages produced before cursor-pivot support rotate about the moving
+    # object's neutral origin, which remains their compatible default.
+    if "rotation_center_world" not in data:
+        matrix = data["moving_object"]["matrix_world"]
+        data["rotation_center_world"] = [matrix[3], matrix[7], matrix[11]]
+    data.setdefault("pose_transform_version", 1)
+    _require(data["pose_transform_version"] in (1, 2), "unsupported pose_transform_version", errors)
+    _require(len(data["rotation_center_world"]) == 3, "rotation_center_world must have 3 values", errors)
     _raise_if_errors(errors)
     return data
 
@@ -287,13 +307,17 @@ def build_model_manifest_v1(
     validity_threshold,
     metrics,
     joint_radius_mm=JOINT_RADIUS_MM,
+    rotation_center_world=None,
+    pose_transform_version=2,
 ):
     errors = []
     _require(opset > 0, "opset must be positive", errors)
-    _require(0.0 < validity_threshold < 1.0, "validity_threshold must be between 0 and 1", errors)
+    _require(0.0 <= validity_threshold <= 1.0, "validity_threshold must be between 0 and 1", errors)
     _require(scale_length > 0, "scale_length must be positive", errors)
     _require(len(neutral_fixed_matrix) == 16, "neutral_fixed_matrix must have 16 values", errors)
     _require(len(neutral_moving_matrix) == 16, "neutral_moving_matrix must have 16 values", errors)
+    if rotation_center_world is not None:
+        _require(len(rotation_center_world) == 3, "rotation_center_world must have 3 values", errors)
     _raise_if_errors(errors)
 
     return {
@@ -311,8 +335,14 @@ def build_model_manifest_v1(
         "fixed_fingerprint": fixed_fingerprint,
         "moving_fingerprint": moving_fingerprint,
         "scale_length": scale_length,
+        "pose_transform_version": pose_transform_version,
         "neutral_fixed_matrix": list(neutral_fixed_matrix),
         "neutral_moving_matrix": list(neutral_moving_matrix),
+        "rotation_center_world": list(
+            rotation_center_world
+            if rotation_center_world is not None
+            else (neutral_moving_matrix[3], neutral_moving_matrix[7], neutral_moving_matrix[11])
+        ),
         "range": {
             "translation_limit_mm": translation_limit_mm,
             "rotation_limit_degrees": rotation_limit_degrees,
@@ -340,7 +370,15 @@ def validate_model_manifest(data):
     output_names = data.get("output_names", {})
     _require("validity_logit" in output_names, "output_names.validity_logit is required", errors)
     _require("clearance_mm" in output_names, "output_names.clearance_mm is required", errors)
-    _require(0.0 < data.get("validity_threshold", -1) < 1.0, "validity_threshold must be between 0 and 1", errors)
+    _require(0.0 <= data.get("validity_threshold", -1) <= 1.0, "validity_threshold must be between 0 and 1", errors)
+    _raise_if_errors(errors)
+
+    if "rotation_center_world" not in data:
+        matrix = data["neutral_moving_matrix"]
+        data["rotation_center_world"] = [matrix[3], matrix[7], matrix[11]]
+    data.setdefault("pose_transform_version", 1)
+    _require(data["pose_transform_version"] in (1, 2), "unsupported pose_transform_version", errors)
+    _require(len(data["rotation_center_world"]) == 3, "rotation_center_world must have 3 values", errors)
     _raise_if_errors(errors)
     return data
 

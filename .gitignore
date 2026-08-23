@@ -1,2 +1,13 @@
 __pycache__/
 *.py[cod]
+biomechanics_training/
+**/neural_training_status.json
+**/neural_training.log
+**/dataset_run.log
+**/dataset/dataset_meta.json
+**/dataset/*.npz
+**/dataset/*_poses.json
+**/model/constraint_model.onnx
+**/model/model_manifest.json
+**/model/metrics.json
+**/model/*.data

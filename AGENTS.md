@@ -15,7 +15,7 @@
 - Use Blender properties and APIs for runtime behavior. Do not add production fallbacks that mock `bpy`; it is supplied by Blender.
 - Keep alignment and comparison behavior on Original meshes; constrained interaction and training operate on Rigid meshes. Preserve the detailed invariants in [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md).
 - Treat [BONE_NEAREST_NEIGHBORS.md](BONE_NEAREST_NEIGHBORS.md) as geometric reference data, not an anatomical attachment or joint graph.
-- Keep `bpy`, evaluated-mesh, modifier, and BVH work on Blender's main thread. Run expensive training in a separate Blender process through `tools/run_training.ps1`, not a Python thread in the UI process.
+- Keep `bpy`, evaluated-mesh, modifier, and BVH work on Blender's main thread. Run expensive neural training in a separate Blender process through `tools/run_neural_training.ps1`, not a Python thread in the UI process.
 
 ## Validation
 

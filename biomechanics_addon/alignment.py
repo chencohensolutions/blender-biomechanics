@@ -1,7 +1,7 @@
 import re
 
 import numpy as np
-from mathutils import Matrix
+from mathutils import Matrix  # pyright: ignore[reportMissingImports]
 
 
 def base_object_name(name):

@@ -21,6 +21,21 @@
                 "reveal": "always",
                 "panel": "dedicated"
             }
+        },
+        {
+            "label": "Blender: Open Add-on Reload Script",
+            "type": "shell",
+            "command": "code",
+            "args": [
+                "--reuse-window",
+                "--goto",
+                "${workspaceFolder}\\tools\\dev_load.py:1"
+            ],
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "never",
+                "panel": "dedicated"
+            }
         }
     ]
 }

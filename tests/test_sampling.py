@@ -58,6 +58,44 @@ class AxisAnchorPosesTest(unittest.TestCase):
         self.assertEqual(rotation, (0.0, 0.0, 0.0))
 
 
+class RotationSweepPosesTest(unittest.TestCase):
+    def test_full_circle_includes_local_and_seam_samples_on_each_axis(self):
+        poses = sampling.rotation_sweep_poses(180.0)
+        for axis in range(3):
+            axis_values = {
+                rotation[axis]
+                for _translation, rotation, _label, _split in poses
+                if sum(value != 0.0 for value in rotation) == 1
+            }
+            self.assertTrue({-180.0, -10.0, -5.0, -2.0, -1.0}.issubset(axis_values))
+            self.assertTrue({1.0, 2.0, 5.0, 10.0, 180.0}.issubset(axis_values))
+
+    def test_local_sweep_populates_every_split(self):
+        poses = sampling.rotation_sweep_poses(180.0)
+        local_splits = {
+            split
+            for _translation, rotation, _label, split in poses
+            if max(abs(value) for value in rotation) <= 10.0
+        }
+        self.assertEqual(local_splits, {"train", "validation", "holdout"})
+
+
+class MultiscalePoseSamplesTest(unittest.TestCase):
+    def test_full_domain_keeps_dense_local_rotation_coverage(self):
+        translation, rotation = sampling.multiscale_pose_samples(
+            np.random.default_rng(9),
+            1000,
+            translation_limit_mm=10.0,
+            rotation_limit_degrees=180.0,
+        )
+        self.assertEqual(translation.shape, (1000, 3))
+        self.assertEqual(rotation.shape, (1000, 3))
+        self.assertTrue(np.all(np.abs(rotation) <= 180.0))
+        local = np.all(np.abs(rotation) <= 10.0, axis=1)
+        self.assertGreaterEqual(int(local.sum()), 200)
+        self.assertTrue(np.any(np.abs(rotation) > 170.0))
+
+
 class SplitIndicesTest(unittest.TestCase):
     def test_partition_covers_all_indices_without_overlap(self):
         rng = np.random.default_rng(7)

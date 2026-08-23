@@ -48,7 +48,56 @@
             "approve": true,
             "matchCommandLine": true
         },
-        "C:/src/blender-biomechanics/.venv/Scripts/python.exe": true
+        "C:/src/blender-biomechanics/.venv/Scripts/python.exe": true,
+        "/^python -m compileall -f biomechanics_addon/neural_constraints\\.py$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python -m compileall -f biomechanics_addon/neural_constraints\\.py biomechanics_addon/interaction\\.py$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        ".venv\\Scripts\\python.exe": true,
+        "/^python -m compileall -f biomechanics_addon tools tests$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python -m unittest tests\\.test_neural_training$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python -m py_compile tools/train_constraint_model\\.py$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^powershell\\.exe -NoProfile -ExecutionPolicy Bypass -File \\.\\\\tools\\\\launch_blender\\.ps1$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python -m compileall biomechanics_addon tools/generate_neural_dataset\\.py$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python -m unittest tests\\.test_neural_constraints -v$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python -m unittest discover -s tests -v; python -m compileall biomechanics_addon$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python -m unittest tests\\.test_sampling -v$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python -m compileall -f biomechanics_addon$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^python -m unittest tests\\.test_schemas tests\\.test_neural_constraints tests\\.test_neural_training -v$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
     },
     "python-envs.defaultEnvManager": "ms-python.python:system"
 }

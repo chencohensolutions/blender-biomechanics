@@ -2,7 +2,7 @@
 
 Run with the EXTERNAL training environment (this workspace's `.venv`, NOT Blender's
 embedded Python). Needs a Blender executable to label new candidate poses in the
-background - auto-detected the same way as `tools/run_training.ps1`, or pass
+background - auto-detected the same way as `tools/run_neural_training.ps1`, or pass
 `--blender-exe` / set the `BLENDER_EXE` environment variable.
 
     .venv/Scripts/python.exe tools/active_learning_loop.py --package-dir <export_dir> \\

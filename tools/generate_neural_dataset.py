@@ -20,7 +20,7 @@ from pathlib import Path
 
 import bpy
 import numpy as np
-from mathutils import Matrix
+from mathutils import Matrix  # pyright: ignore[reportMissingImports]
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 if str(REPOSITORY_ROOT) not in sys.path:
@@ -28,13 +28,16 @@ if str(REPOSITORY_ROOT) not in sys.path:
 
 from biomechanics_addon import dataset_io, sampling
 from biomechanics_addon.schemas import build_dataset_row, validate_dataset_row, validate_package_v2
-from biomechanics_addon.training import (
+from biomechanics_addon.neural_geometry import (
     evaluate_local_pose,
     full_mesh_geometry,
     object_fingerprint,
     proxy_geometry,
     world_bvh,
 )
+
+
+SAMPLING_ALGORITHM_VERSION = 2
 
 
 def parse_arguments():
@@ -47,6 +50,8 @@ def parse_arguments():
     parser.add_argument("--max-balance-rounds", type=int, default=2)
     parser.add_argument("--balance-round-size", type=int, default=250)
     parser.add_argument("--max-refinement-pairs", type=int, default=150)
+    parser.add_argument("--refinement-rounds", type=int, default=3)
+    parser.add_argument("--refinement-search-subset", type=int, default=2000)
     parser.add_argument("--chunk-size", type=int, default=500)
     parser.add_argument(
         "--label-poses-file", type=Path, default=None,
@@ -87,12 +92,16 @@ def _config_fingerprint(package, args):
             "moving_fingerprint": package["moving_object"]["fingerprint"],
             "range": package["range"],
             "sampling": package["sampling"],
+            "pose_transform_version": package["pose_transform_version"],
             "sample_budget": args.sample_budget,
             "minimum_clearance_mm": args.minimum_clearance_mm,
             "max_balance_rounds": args.max_balance_rounds,
             "balance_round_size": args.balance_round_size,
             "max_refinement_pairs": args.max_refinement_pairs,
+            "refinement_rounds": args.refinement_rounds,
+            "refinement_search_subset": args.refinement_search_subset,
             "chunk_size": args.chunk_size,
+            "sampling_algorithm_version": SAMPLING_ALGORITHM_VERSION,
         },
         sort_keys=True,
     ).encode("utf-8")
@@ -139,6 +148,8 @@ def _make_evaluator(
     moving_vertices,
     moving_polygons,
     neutral_matrix,
+    rotation_center_world,
+    pose_transform_version,
     baseline_overlap_pairs,
     minimum_clearance,
     millimeters_per_blender_unit,
@@ -158,6 +169,8 @@ def _make_evaluator(
             rx,
             ry,
             rz,
+            rotation_center_world,
+            pose_transform_version,
             baseline_overlap_pairs,
             minimum_clearance,
         )
@@ -186,14 +199,31 @@ def _generate_anchor_rows(evaluate_full, translation_limit_mm, rotation_limit_de
     rows.append(
         _build_row(
             "anchor-neutral", neutral_translation, neutral_rotation, evaluation,
-            "full_mesh", "validation", "anchor-neutral", millimeters_per_blender_unit,
+            "full_mesh", "train", "anchor-neutral", millimeters_per_blender_unit,
         )
     )
     for translation, rotation, label in sampling.axis_anchor_poses(translation_limit_mm, rotation_limit_degrees):
+        if label.startswith("r"):
+            continue
         evaluation = evaluate_full(translation, rotation)
         pose_id = f"anchor-{label}"
         rows.append(
             _build_row(pose_id, translation, rotation, evaluation, "full_mesh", "validation", pose_id, millimeters_per_blender_unit)
+        )
+    for translation, rotation, label, split in sampling.rotation_sweep_poses(rotation_limit_degrees):
+        evaluation = evaluate_full(translation, rotation)
+        pose_id = f"rotation-sweep-{label}"
+        rows.append(
+            _build_row(
+                pose_id,
+                translation,
+                rotation,
+                evaluation,
+                "full_mesh",
+                split,
+                pose_id,
+                millimeters_per_blender_unit,
+            )
         )
     return rows
 
@@ -203,8 +233,12 @@ def _generate_lhs_rows(
 ):
     if count <= 0:
         return []
-    unit_samples = sampling.latin_hypercube_unit(_stage_rng(seed, "lhs"), count, 6)
-    translation_mm, rotation_degrees = sampling.scale_unit_samples(unit_samples, translation_limit_mm, rotation_limit_degrees)
+    translation_mm, rotation_degrees = sampling.multiscale_pose_samples(
+        _stage_rng(seed, "lhs"),
+        count,
+        translation_limit_mm,
+        rotation_limit_degrees,
+    )
     splits = sampling.split_indices(count, _stage_rng(seed, "lhs-split"))
     split_of_index = {}
     for split_name, indices in splits.items():
@@ -273,7 +307,9 @@ def _generate_balance_rows(
     return rows
 
 
-def _generate_refinement_rows(existing_rows, evaluate_proxy, evaluate_full, seed, max_pairs, millimeters_per_blender_unit):
+def _generate_refinement_rows(
+    existing_rows, evaluate_proxy, evaluate_full, seed, round_index, max_pairs, search_subset, millimeters_per_blender_unit
+):
     candidates = [row for row in existing_rows if row["label_source"] == "proxy"]
     if len(candidates) < 2:
         return []
@@ -281,7 +317,8 @@ def _generate_refinement_rows(existing_rows, evaluate_proxy, evaluate_full, seed
     rotation_degrees = np.array([row["rotation_degrees"] for row in candidates])
     valid = np.array([row["valid"] for row in candidates])
     pairs = sampling.find_disagreeing_pairs(
-        translation_mm, rotation_degrees, valid, _stage_rng(seed, "refinement"), max_pairs=max_pairs
+        translation_mm, rotation_degrees, valid, _stage_rng(seed, f"refinement-{round_index}"),
+        search_subset=search_subset, max_pairs=max_pairs,
     )
 
     rows = []
@@ -301,7 +338,7 @@ def _generate_refinement_rows(existing_rows, evaluate_proxy, evaluate_full, seed
         # sample is exactly the "uncertain/boundary" case that needs an authoritative full-mesh label.
         evaluation = evaluate_full(mid_translation, mid_rotation)
         split_name = "holdout" if "holdout" in (valid_row["split"], invalid_row["split"]) else valid_row["split"]
-        pose_id = f"refine-{pair_index:04d}"
+        pose_id = f"refine-{round_index}-{pair_index:04d}"
         rows.append(
             _build_row(pose_id, mid_translation, mid_rotation, evaluation, "full_mesh", split_name, pose_id, millimeters_per_blender_unit)
         )
@@ -446,6 +483,8 @@ def _run_pose_labeling_mode(args, package, package_dir, output_dir):
     scale_length = package["scale_length"]
     millimeters_per_blender_unit = scale_length * 1000.0
     neutral_matrix = moving_object.matrix_world.copy()
+    rotation_center_world = package["rotation_center_world"]
+    pose_transform_version = package["pose_transform_version"]
     minimum_clearance = args.minimum_clearance_mm / millimeters_per_blender_unit
 
     fixed_full_vertices, fixed_full_polygons = full_mesh_geometry(context, fixed_object)
@@ -456,7 +495,7 @@ def _run_pose_labeling_mode(args, package, package_dir, output_dir):
 
     evaluate_full = _make_evaluator(
         fixed_full_bvh, fixed_full_world_vertices, moving_full_vertices, moving_full_polygons,
-        neutral_matrix, full_baseline_overlap_pairs, minimum_clearance, millimeters_per_blender_unit,
+        neutral_matrix, rotation_center_world, pose_transform_version, full_baseline_overlap_pairs, minimum_clearance, millimeters_per_blender_unit,
     )
 
     _run_stage(
@@ -494,6 +533,8 @@ def main():
     proxy_max_faces = package["sampling"]["proxy_max_faces"]
     seed = package["sampling"]["seed"]
     neutral_matrix = moving_object.matrix_world.copy()
+    rotation_center_world = package["rotation_center_world"]
+    pose_transform_version = package["pose_transform_version"]
     minimum_clearance = args.minimum_clearance_mm / millimeters_per_blender_unit
 
     fixed_proxy_vertices, fixed_proxy_polygons = proxy_geometry(context, fixed_object, proxy_max_faces)
@@ -510,11 +551,11 @@ def main():
 
     evaluate_proxy = _make_evaluator(
         fixed_proxy_bvh, fixed_proxy_world_vertices, moving_proxy_vertices, moving_proxy_polygons,
-        neutral_matrix, proxy_baseline_overlap_pairs, minimum_clearance, millimeters_per_blender_unit,
+        neutral_matrix, rotation_center_world, pose_transform_version, proxy_baseline_overlap_pairs, minimum_clearance, millimeters_per_blender_unit,
     )
     evaluate_full = _make_evaluator(
         fixed_full_bvh, fixed_full_world_vertices, moving_full_vertices, moving_full_polygons,
-        neutral_matrix, full_baseline_overlap_pairs, minimum_clearance, millimeters_per_blender_unit,
+        neutral_matrix, rotation_center_world, pose_transform_version, full_baseline_overlap_pairs, minimum_clearance, millimeters_per_blender_unit,
     )
 
     all_rows = _run_stage(
@@ -543,10 +584,17 @@ def main():
         if not round_rows:
             break
 
-    all_rows += _run_stage(
-        output_dir, meta, "refinement", args.chunk_size,
-        lambda: _generate_refinement_rows(all_rows, evaluate_proxy, evaluate_full, seed, args.max_refinement_pairs, millimeters_per_blender_unit),
-    )
+    for round_index in range(args.refinement_rounds):
+        round_rows = _run_stage(
+            output_dir, meta, f"refinement-{round_index}", args.chunk_size,
+            lambda round_index=round_index: _generate_refinement_rows(
+                all_rows, evaluate_proxy, evaluate_full, seed, round_index,
+                args.max_refinement_pairs, args.refinement_search_subset, millimeters_per_blender_unit,
+            ),
+        )
+        all_rows += round_rows
+        if not round_rows:
+            break
 
     _finalize_meta(output_dir, meta, all_rows)
     logging.info("complete: %d rows -> %s", len(all_rows), output_dir)

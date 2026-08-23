@@ -1,18 +1,19 @@
-import bpy
-import json
+import bpy  # pyright: ignore[reportMissingImports]
 import math
-from bpy.app.handlers import persistent
-from mathutils import Euler, Matrix, Quaternion, Vector
+from bpy.app.handlers import persistent  # pyright: ignore[reportMissingImports]
+from mathutils import Euler, Matrix, Quaternion, Vector  # pyright: ignore[reportMissingImports]
+
+from . import neural_constraints
 
 
 TARGET_NAME = "Biomechanics Target"
-POINT_TARGET_NAME = "Biomechanics Point Target"
 ATTACHED_BONE_MAP = {
     "ilium R": ("femur R",),
 }
 _is_solving = False
-_trained_pose_cache = {}
 _attached_bone_cache = {}
+_neural_pose_cache = {}
+_last_solved_matrices = {}
 
 
 def _matrix_from_values(values):
@@ -71,6 +72,16 @@ def clear_attached_bones(scene=None):
         _attached_bone_cache.pop(scene.as_pointer(), None)
 
 
+def clear_interaction_state(scene=None):
+    if scene is None:
+        _last_solved_matrices.clear()
+        _neural_pose_cache.clear()
+    else:
+        scene_key = scene.as_pointer()
+        _last_solved_matrices.pop(scene_key, None)
+        _neural_pose_cache.pop(scene_key, None)
+
+
 def _move_attached_bones(scene, leader, leader_matrix):
     if not scene.biomechanics_move_attached_bones:
         return
@@ -91,115 +102,153 @@ def _matrices_match(first, second, tolerance=1e-5):
     )
 
 
-def prepare_trained_constraints(scene, manipulated):
-    clear_trained_constraints(scene)
-    text = scene.biomechanics_training_result_text
-    if text is None:
-        return False, "No training dataset selected; using scalar limits"
+def _pivot_rotated_matrix(neutral, rotation, rotation_center):
+    """Return the neutral moving matrix rotated around the trained world-space pivot."""
+    _neutral_location, neutral_rotation, _neutral_scale = neutral.decompose()
+    world_rotation = (
+        neutral_rotation.to_matrix().to_4x4()
+        @ rotation.to_matrix().to_4x4()
+        @ neutral_rotation.inverted().to_matrix().to_4x4()
+    )
+    return (
+        Matrix.Translation(rotation_center)
+        @ world_rotation
+        @ Matrix.Translation(-rotation_center)
+        @ neutral
+    )
+
+
+def _neural_constrained_matrix(scene, manipulated, target_matrix):
+    registry = getattr(scene, "biomechanics_neural_models", ())
+    model_entries = [
+        entry for entry in registry if entry.moving_object_name == manipulated.name
+    ]
+    legacy_manifest_path = None
+    if not model_entries and scene.biomechanics_neural_model_path:
+        # Compatibility with scenes saved before the per-pair registry was introduced.
+        legacy_manifest_path = scene.biomechanics_neural_model_path
+    if not model_entries and legacy_manifest_path is None:
+        if registry:
+            scene.biomechanics_neural_model_status = (
+                f"No trained neural model moves {manipulated.name}; using scalar limits"
+            )
+            return None
+        return None
+
+    rigid_collection = scene.biomechanics_target_collection
+    last_problem = None
+    candidates = [(entry.manifest_path, entry.fixed_object_name) for entry in model_entries]
+    if legacy_manifest_path is not None:
+        candidates.append((legacy_manifest_path, None))
+    for manifest_path, fixed_name in candidates:
+        try:
+            if fixed_name is None:
+                manifest = neural_constraints.load_manifest(bpy.path.abspath(manifest_path))
+                fixed_name = manifest["fixed_object"]["name"]
+            fixed_object = (
+                rigid_collection.objects.get(fixed_name)
+                if rigid_collection is not None
+                else None
+            )
+            if fixed_object is None or fixed_object.type != "MESH":
+                last_problem = f"fixed bone {fixed_name} is unavailable in Rigid"
+                continue
+            manifest, onnx_path, reasons = neural_constraints.load_cached_model(
+                bpy.context,
+                bpy.path.abspath(manifest_path),
+                fixed_object,
+                manipulated,
+            )
+        except neural_constraints.ModelLoadError as exc:
+            last_problem = str(exc)
+            continue
+        if reasons:
+            last_problem = "; ".join(reasons)
+            continue
+        break
+    else:
+        if last_problem:
+            scene.biomechanics_neural_model_status = (
+                "Neural model unavailable; using scalar limits: " + last_problem
+            )
+        return None
+
+    cache_key = scene.as_pointer()
+    cache = _neural_pose_cache.get(cache_key)
+    if (
+        cache is None
+        or cache["path"] != str(onnx_path)
+        or cache["session_generation"] != neural_constraints.session_cache_generation()
+    ):
+        cache = {
+            "path": str(onnx_path),
+            "manifest": manifest,
+            "session": neural_constraints.get_session(onnx_path),
+            "accepted_pose": (0.0,) * 6,
+            "session_generation": neural_constraints.session_cache_generation(),
+        }
+        _neural_pose_cache[cache_key] = cache
+
+    neutral = _matrix_from_values(manifest["neutral_moving_matrix"])
+    target_rotation = neutral.to_quaternion().inverted() @ target_matrix.to_quaternion()
+    target_rotation.normalize()
+    _neutral_location, neutral_rotation, neutral_scale = neutral.decompose()
+    rotation_center = Vector(manifest["rotation_center_world"])
+    rotation_only_matrix = _pivot_rotated_matrix(neutral, target_rotation, rotation_center)
+    true_world_translation = target_matrix.translation - rotation_only_matrix.translation
+    local_translation = neutral_rotation.inverted() @ true_world_translation
+    millimeters_per_blender_unit = (scene.unit_settings.scale_length or 1.0) * 1000.0
+    target_pose = tuple(
+        local_translation[index]
+        * (neutral_scale[index] if manifest["pose_transform_version"] == 1 else 1.0)
+        * millimeters_per_blender_unit
+        for index in range(3)
+    ) + tuple(math.degrees(value) for value in target_rotation.to_euler("XYZ"))
+
+    clamped_target_pose = neural_constraints.clamp_pose_to_range(target_pose, manifest)
+    target_was_clamped = clamped_target_pose != target_pose
+    target_pose = clamped_target_pose
 
     try:
-        result = json.loads(text.as_string())
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return False, "Training dataset is not valid JSON; using scalar limits"
-
-    if result.get("format_version") != 1:
-        return False, "Unsupported training format; using scalar limits"
-    if result.get("moving_object") != manipulated.name:
-        return False, "Training dataset belongs to a different moving bone"
-
-    trained_neutral = _matrix_from_values(result.get("neutral_moving_matrix", ()))
-    if not _matrices_match(trained_neutral, manipulated.matrix_world):
-        return False, "Moving bone changed since training; using scalar limits"
-    fixed_object = bpy.data.objects.get(result.get("fixed_object", ""))
-    if fixed_object is None:
-        return False, "Trained fixed bone is missing; using scalar limits"
-    trained_fixed = _matrix_from_values(result.get("neutral_fixed_matrix", ()))
-    if not _matrices_match(trained_fixed, fixed_object.matrix_world):
-        return False, "Fixed bone changed since training; using scalar limits"
-
-    scale_length = scene.unit_settings.scale_length or 1.0
-    millimeters_per_blender_unit = scale_length * 1000.0
-    candidates = []
-    for sample in result.get("samples", ()):
-        if not sample.get("valid"):
-            continue
-        translation_mm = sample["translation_mm"]
-        rotation_degrees = sample["rotation_degrees"]
-        translation = Vector(translation_mm) / millimeters_per_blender_unit
-        rotation = Euler(
-            tuple(math.radians(value) for value in rotation_degrees),
-            "XYZ",
-        ).to_quaternion()
-        local_matrix = Matrix.LocRotScale(translation, rotation, Vector((1.0, 1.0, 1.0)))
-        candidates.append((local_matrix, translation, rotation))
-
-    if not candidates:
-        return False, "Training dataset contains no valid poses"
-    if len(candidates) == 1:
-        return False, "Training dataset contains only one valid pose; retrain with nonzero ranges"
-
-    _trained_pose_cache[scene.as_pointer()] = {
-        "neutral": trained_neutral,
-        "candidates": candidates,
-        "millimeters_per_blender_unit": millimeters_per_blender_unit,
-        "moving_object": manipulated.name,
-    }
-    prepare_attached_bones(scene, manipulated)
-    return True, f"Using {len(candidates):,} trained valid poses"
-
-
-def clear_trained_constraints(scene=None):
-    if scene is None:
-        _trained_pose_cache.clear()
-    else:
-        _trained_pose_cache.pop(scene.as_pointer(), None)
-
-
-def _trained_constrained_matrix(scene, manipulated, target_matrix):
-    cache = _trained_pose_cache.get(scene.as_pointer())
-    if cache is None or cache["moving_object"] != manipulated.name:
-        return None
-
-    neutral = cache["neutral"]
-    target_local = neutral.inverted_safe() @ target_matrix
-    target_translation, target_rotation, _target_scale = target_local.decompose()
-    millimeters_per_blender_unit = cache["millimeters_per_blender_unit"]
-    joint_radius_mm = 50.0
-
-    def pose_distance(candidate):
-        _matrix, translation, rotation = candidate
-        translation_distance_mm = (
-            (translation - target_translation).length * millimeters_per_blender_unit
+        projected_pose, prediction = neural_constraints.project_pose(
+            cache["session"],
+            manifest,
+            cache["accepted_pose"],
+            target_pose,
         )
-        rotation_distance_mm = rotation.rotation_difference(target_rotation).angle * joint_radius_mm
-        return translation_distance_mm ** 2 + rotation_distance_mm ** 2
-
-    local_matrix, _translation, _rotation = min(cache["candidates"], key=pose_distance)
-    return neutral @ local_matrix
-
-
-def _trained_point_constrained_matrix(scene, manipulated, target_location, local_point):
-    cache = _trained_pose_cache.get(scene.as_pointer())
-    if cache is None or cache["moving_object"] != manipulated.name:
+    except neural_constraints.ModelLoadError as exc:
+        scene.biomechanics_neural_model_status = (
+            f"Neural projection unavailable; using scalar limits: {exc}"
+        )
         return None
 
-    neutral = cache["neutral"]
-
-    def point_distance(candidate):
-        local_matrix, _translation, _rotation = candidate
-        candidate_point = (neutral @ local_matrix) @ local_point
-        return (candidate_point - target_location).length_squared
-
-    local_matrix, _translation, _rotation = min(cache["candidates"], key=point_distance)
-    return neutral @ local_matrix
+    cache["accepted_pose"] = projected_pose
+    projection_text = "projected" if target_was_clamped or projected_pose != target_pose else "accepted"
+    scene.biomechanics_neural_model_status = (
+        f"Neural {projection_text}: {prediction['validity_probability']:.3f} valid, "
+        f"clearance {prediction['clearance_mm']:.2f} mm"
+    )
+    translation = Vector(projected_pose[:3]) / millimeters_per_blender_unit
+    rotation = Euler(tuple(math.radians(value) for value in projected_pose[3:]), "XYZ").to_quaternion()
+    local_translation = Vector(
+        tuple(
+            translation[index] / neutral_scale[index]
+            if manifest["pose_transform_version"] == 1
+            else translation[index]
+            for index in range(3)
+        )
+    )
+    return (
+        Matrix.Translation(neutral_rotation @ local_translation)
+        @ _pivot_rotated_matrix(neutral, rotation, rotation_center)
+    )
 
 
 def constrained_matrix(scene, target_matrix, manipulated=None):
-    trained_matrix = None
     if manipulated is not None:
-        trained_matrix = _trained_constrained_matrix(scene, manipulated, target_matrix)
-    if trained_matrix is not None:
-        return trained_matrix
+        neural_matrix = _neural_constrained_matrix(scene, manipulated, target_matrix)
+        if neural_matrix is not None:
+            return neural_matrix
 
     neutral = neutral_matrix(scene)
     neutral_location, neutral_rotation, neutral_scale = neutral.decompose()
@@ -229,31 +278,28 @@ def solve_scene(scene):
 
     if _is_solving or not scene.biomechanics_live_solve:
         return
+    if scene.biomechanics_neural_training_active:
+        return
     target = scene.biomechanics_pose_target
     manipulated = scene.biomechanics_manipulated_object
-    cache = _trained_pose_cache.get(scene.as_pointer())
-    if manipulated is None and cache is not None:
-        manipulated = bpy.data.objects.get(cache["moving_object"])
-    if manipulated is None:
+    if target is None or manipulated is None:
         return
 
     _is_solving = True
     try:
-        if target is not None and target.get("biomechanics_point_target"):
-            local_point = Vector(target["biomechanics_local_point"])
-            solved_matrix = _trained_point_constrained_matrix(
-                scene,
-                manipulated,
-                target.matrix_world.translation,
-                local_point,
-            )
-            if solved_matrix is None:
-                return
-        else:
-            requested_matrix = target.matrix_world if target is not None else manipulated.matrix_world
-            solved_matrix = constrained_matrix(scene, requested_matrix, manipulated)
+        scene_key = scene.as_pointer()
+        last_solved = _last_solved_matrices.get(scene_key)
+        direct_mesh_edit = (
+            bpy.context.active_object is manipulated
+            and (last_solved is None or not _matrices_match(manipulated.matrix_world, last_solved))
+        )
+        if direct_mesh_edit:
+            target.matrix_world = manipulated.matrix_world
+        requested_matrix = target.matrix_world
+        solved_matrix = constrained_matrix(scene, requested_matrix, manipulated)
         if not _matrices_match(manipulated.matrix_world, solved_matrix):
             manipulated.matrix_world = solved_matrix
+        _last_solved_matrices[scene_key] = solved_matrix.copy()
         _move_attached_bones(scene, manipulated, solved_matrix)
     finally:
         _is_solving = False
@@ -270,22 +316,41 @@ def remove_pose_targets(scene=None):
 
 @persistent
 def solve_interaction(_scene, _depsgraph):
+    updated_ids = {
+        getattr(update.id, "original", None) or update.id
+        for update in _depsgraph.updates
+    }
     for scene in bpy.data.scenes:
+        neural_constraints.invalidate_model_cache(scene, _depsgraph)
+        target = scene.biomechanics_pose_target
+        manipulated = scene.biomechanics_manipulated_object
+        if target is None or manipulated is None:
+            continue
+        if target not in updated_ids and manipulated not in updated_ids:
+            continue
         solve_scene(scene)
 
 
 def register_interaction():
-    if solve_interaction not in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.append(solve_interaction)
+    for handler in tuple(bpy.app.handlers.depsgraph_update_post):
+        if (
+            getattr(handler, "__name__", None) == solve_interaction.__name__
+            and getattr(handler, "__module__", None) == solve_interaction.__module__
+        ):
+            bpy.app.handlers.depsgraph_update_post.remove(handler)
+    bpy.app.handlers.depsgraph_update_post.append(solve_interaction)
     for scene in bpy.data.scenes:
-        moving_object = scene.biomechanics_training_moving_object
-        if moving_object is not None and scene.biomechanics_training_result_text is not None:
-            prepare_trained_constraints(scene, moving_object)
+        if scene.biomechanics_training_moving_object is not None:
+            prepare_attached_bones(scene, scene.biomechanics_training_moving_object)
 
 
 def unregister_interaction():
-    if solve_interaction in bpy.app.handlers.depsgraph_update_post:
-        bpy.app.handlers.depsgraph_update_post.remove(solve_interaction)
-    clear_trained_constraints()
+    for handler in tuple(bpy.app.handlers.depsgraph_update_post):
+        if (
+            getattr(handler, "__name__", None) == solve_interaction.__name__
+            and getattr(handler, "__module__", None) == solve_interaction.__module__
+        ):
+            bpy.app.handlers.depsgraph_update_post.remove(handler)
     clear_attached_bones()
+    clear_interaction_state()
     remove_pose_targets()

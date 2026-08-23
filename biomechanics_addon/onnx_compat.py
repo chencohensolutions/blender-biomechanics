@@ -1,14 +1,14 @@
 """Blender-side ONNX Runtime compatibility diagnostics for neural constraints.
 
 Reports whether the embedded Blender Python can import `onnxruntime` so the
-UI can disable neural controls and fall back to format-v1 discrete/scalar
-behavior when it cannot. Never raises; unavailability is a reported state.
+UI can report that neural controls are unavailable while unrestricted interaction remains
+available. Never raises; unavailability is a reported state.
 """
 
 import platform
 import sys
 
-import bpy
+import bpy  # pyright: ignore[reportMissingImports]
 
 
 def check_onnx_runtime():

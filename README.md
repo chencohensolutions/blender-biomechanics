@@ -18,47 +18,63 @@ next-session development priorities.
 
 The task starts Blender and registers `biomechanics_addon` directly from this checkout; no ZIP rebuild or installation is needed. After editing the source while Blender remains open, switch to the **Scripting** workspace, open `tools/dev_load.py`, and press `Alt+P` to reload the add-on.
 
-## Terminal Training
+## One-Click Neural Training
 
-The add-on can export a two-object training package and run the existing geometric
-trainer in a separate background Blender process. The source Rigid objects and the
-open `.blend` file are not modified by the worker.
+The **Geometric Dataset** panel launches the resumable external neural pipeline.
+Choose the fixed and moving meshes in **Rigid**, set the Translation Domain (mm) and
+Rotation Domain (degrees), choose an export folder, and select **Start One-Click Neural
+Training**. The operator refreshes the package using those domains, then starts a visible
+PowerShell window without blocking Blender. Blender polls `neural_training_status.json`;
+the external process writes detailed output to `neural_training.log`.
 
-1. Reload the add-on from `tools/dev_load.py` after updating the source.
-2. In **Two-Bone Geometric Training**, choose the fixed and moving Rigid meshes.
-3. Set the ranges, steps, proxy face budget, and maximum sample count.
-4. Choose **Training Folder**. The default is `biomechanics_training` beside the
-	saved `.blend` file.
-5. Select **Export Terminal Training Package**.
-6. From the repository root, run:
-
-	```powershell
-	.\tools\run_training.ps1 -PackagePath ".\biomechanics_training"
-	```
-
-The package contains `training_input.blend`, `training_config.json`, and
-`RUN_COMMAND.txt`. The terminal displays completed samples, percentage, valid count,
-and elapsed time. A successful run writes `training_result.json` into the same
-folder. Set `BLENDER_EXE` or pass `-BlenderPath` when Blender is not discoverable:
+The same workflow is available from the repository root:
 
 ```powershell
-.\tools\run_training.ps1 `
-	 -PackagePath ".\biomechanics_training" `
-	 -BlenderPath "C:\Program Files\Blender Foundation\Blender 4.5\blender.exe"
+.\tools\run_neural_training.ps1 `
+	-PackagePath ".\biomechanics_training" `
+	-BlenderPath "C:\Program Files\Blender Foundation\Blender 5.2\blender.exe" `
+	-PythonPath ".\.venv\Scripts\python.exe"
 ```
 
-This worker currently uses the format-version-1 proxy overlap and clearance
-classifier. It is suitable for bounded exploratory runs, but it does not yet
-guarantee 0.1 mm surface accuracy or anatomical validity.
+The script discovers Blender from `PATH`, common installations, Scoop, and the
+Microsoft Store launcher. It creates or reuses `.venv`; pass `-InstallRequirements`
+when that environment needs the pinned `requirements-neural.txt` packages. Without
+that switch, a missing dependency fails early instead of changing an existing
+environment during a training run.
+
+Stage A runs the background-Blender dataset generator and reuses compatible stage
+checkpoints in `dataset/`. Stage B trains and publishes a model only after ONNX
+parity succeeds; `model_manifest.json` is written last, so a partial model is never
+treated as active. Add `-ActiveLearning` for bounded uncertain-pose labeling, for
+example:
+
+```powershell
+.\tools\run_neural_training.ps1 `
+	-PackagePath ".\biomechanics_training" `
+	-ActiveLearning -ActiveRounds 3 -MaxTotalNewSamples 120 `
+	-MaxRuntimeSeconds 1800
+```
+
+Rerunning a package resumes dataset stages and retrains from the existing dataset;
+the script does not delete checkpoints or the last complete model. Status states are
+`running`, `completed`, `converged`, and `failed`, with the exact stage command,
+exit code, artifact paths, and available holdout metrics recorded in the status JSON.
+The learned output represents geometric feasibility under the documented label rule,
+not anatomical truth or an exact collision proof. Microsoft Store Blender may not
+forward background console output reliably, so inspect the package log and status
+files when diagnosing a run.
 
 ## Source Layout
 
 - `biomechanics_addon/__init__.py`: add-on metadata, class order, and registration lifecycle.
 - `biomechanics_addon/alignment.py`: mesh comparison and rigid-transform math.
 - `biomechanics_addon/interaction.py`: live target-based constrained transforms.
+- `biomechanics_addon/neural_geometry.py`: evaluated mesh geometry and pose labeling helpers.
+- `biomechanics_addon/neural_training.py`: bpy-free launch, status, and artifact helpers.
 - `biomechanics_addon/operators.py`: user actions and input validation.
 - `biomechanics_addon/panels.py`: 3D Viewport sidebar interface.
 - `biomechanics_addon/properties.py`: scene-level collection settings.
+- `tools/run_neural_training.ps1`: resumable dataset, training, and active-learning orchestration.
 
 ## Blender MCP
 
@@ -96,8 +112,9 @@ this workflow and is used only for alignment and comparison.
 1. Select one mesh in Rigid, such as `ilium R.002`.
 2. Select **Start Constrained Move**.
 3. Move or rotate the **Biomechanics Target** Empty with `G` or `R`.
-4. Adjust the local translation limit in millimeters and the rotation limit while
-	**Live Solve** is enabled.
+4. With a neural model imported, the trained movement domain and geometric validity
+	projection constrain movement while **Live Solve** is enabled. Without a neural
+	model, movement is unrestricted.
 5. Select **Reset to Neutral** or **Commit and Stop**.
 
 The target displays the requested pose while the rigid mesh stops at the configured
