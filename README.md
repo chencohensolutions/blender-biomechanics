@@ -18,6 +18,12 @@ next-session development priorities.
 
 The task starts Blender and registers `biomechanics_addon` directly from this checkout; no ZIP rebuild or installation is needed. After editing the source while Blender remains open, switch to the **Scripting** workspace, open `tools/dev_load.py`, and press `Alt+P` to reload the add-on.
 
+### macOS
+
+1. Install Blender 3.6 or newer in `/Applications` (or `~/Applications`), or set `BLENDER_EXE` to the Blender executable or `Blender.app` before starting VS Code.
+2. Press `Cmd+Shift+B` and select **Blender: Run Add-on from Source (macOS)**. The task runs `tools/launch_blender.sh`, which uses the newest installed Blender.
+3. **Blender: Open Add-on Reload Script (macOS)** opens `tools/dev_load.py` in VS Code. It requires the `code` command on your PATH (VS Code: **Shell Command: Install 'code' command in PATH**).
+
 ## One-Click Neural Training
 
 The **Geometric Dataset** panel launches the resumable external neural pipeline.
