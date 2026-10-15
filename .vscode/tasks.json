@@ -12,8 +12,17 @@
                 "-File",
                 "${workspaceFolder}\\tools\\launch_blender.ps1"
             ],
-            "group": "build",
             "windows": {
+                "group": {
+                    "kind": "build",
+                    "isDefault": true
+                }
+            },
+            "osx": {
+                "command": "/bin/sh",
+                "args": [
+                    "${workspaceFolder}/tools/launch_blender.sh"
+                ],
                 "group": {
                     "kind": "build",
                     "isDefault": true
@@ -34,38 +43,13 @@
                 "--goto",
                 "${workspaceFolder}\\tools\\dev_load.py:1"
             ],
-            "problemMatcher": [],
-            "presentation": {
-                "reveal": "never",
-                "panel": "dedicated"
-            }
-        },
-        {
-            "label": "Blender: Run Add-on from Source (macOS)",
-            "type": "shell",
-            "command": "/bin/sh",
-            "args": [
-                "${workspaceFolder}/tools/launch_blender.sh"
-            ],
-            "group": {
-                "kind": "build",
-                "isDefault": true
+            "osx": {
+                "args": [
+                    "--reuse-window",
+                    "--goto",
+                    "${workspaceFolder}/tools/dev_load.py:1"
+                ]
             },
-            "problemMatcher": [],
-            "presentation": {
-                "reveal": "always",
-                "panel": "dedicated"
-            }
-        },
-        {
-            "label": "Blender: Open Add-on Reload Script (macOS)",
-            "type": "shell",
-            "command": "code",
-            "args": [
-                "--reuse-window",
-                "--goto",
-                "${workspaceFolder}/tools/dev_load.py:1"
-            ],
             "problemMatcher": [],
             "presentation": {
                 "reveal": "never",
