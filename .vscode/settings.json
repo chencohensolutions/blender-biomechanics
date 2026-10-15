@@ -1,4 +1,5 @@
 {
+    "editor.formatOnSave": true,
     "chat.tools.terminal.autoApprove": {
         "/^python -m compileall biomechanics_addon$/": {
             "approve": true,
