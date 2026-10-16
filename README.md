@@ -86,6 +86,8 @@ files when diagnosing a run.
 
 The workspace MCP server is configured in `.vscode/mcp.json`. BlenderMCP also needs its Blender add-on installed and enabled in the current Blender profile.
 
+The server runs through `uvx`, resolved from `PATH` on both macOS and Windows. Install [uv](https://docs.astral.sh/uv/) first (`brew install uv` on macOS, `winget install astral-sh.uv` on Windows), then restart VS Code so it picks up the updated `PATH`.
+
 1. Restart Blender after enabling the BlenderMCP add-on, or activate it in the current session from a Python Console with `import bpy; bpy.ops.preferences.addon_enable(module="blender_mcp")`.
 2. In VS Code, run **MCP: List Servers**, select **blender**, and start it. Confirm the local-server trust prompt.
 

@@ -2,7 +2,7 @@
     "servers": {
         "blender": {
             "type": "stdio",
-            "command": "${env:USERPROFILE}\\.local\\bin\\uvx.exe",
+            "command": "uvx",
             "args": [
                 "--python",
                 "3.11",
