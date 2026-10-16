@@ -668,13 +668,27 @@ class BIOMECHANICS_OT_align_to_source(bpy.types.Operator):
         if source_collection == target_collection:
             self.report({"ERROR"}, "Original and rigid collections must be different")
             return {"CANCELLED"}
-        if (
-            selected_object is None
-            or selected_object.type != "MESH"
-            or source_collection.objects.get(selected_object.name) is not selected_object
-        ):
-            self.report({"ERROR"}, "Select one mesh object from the original collection")
+        if selected_object is None or selected_object.type != "MESH":
+            self.report({"ERROR"}, "Select one mesh object from the original or rigid collection")
             return {"CANCELLED"}
+        if source_collection.objects.get(selected_object.name) is not selected_object:
+            if target_collection.objects.get(selected_object.name) is not selected_object:
+                self.report({"ERROR"}, "Select one mesh object from the original or rigid collection")
+                return {"CANCELLED"}
+            # A Rigid selection stands for the same bone in Original.
+            rigid_name = base_object_name(selected_object.name)
+            original_matches = [
+                obj
+                for obj in source_collection.objects
+                if obj.type == "MESH" and base_object_name(obj.name) == rigid_name
+            ]
+            if not original_matches:
+                self.report({"ERROR"}, f'No original pair found for "{selected_object.name}"')
+                return {"CANCELLED"}
+            if len(original_matches) > 1:
+                self.report({"ERROR"}, f'Multiple original pairs found for "{selected_object.name}"')
+                return {"CANCELLED"}
+            selected_object = original_matches[0]
 
         pair_name = base_object_name(selected_object.name)
         matching_objects = [

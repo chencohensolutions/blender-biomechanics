@@ -13,7 +13,7 @@ from gpu_extras.batch import batch_for_shader  # pyright: ignore[reportMissingIm
 
 from .alignment import local_vertices, world_vertices
 from .correspondence import paired_mesh
-from .properties import _update_transparency_overlay, _view_3d_spaces
+from .properties import PREVIOUS_HIDDEN_KEY, _update_transparency_overlay, _view_3d_spaces
 
 
 HEATMAP_ATTRIBUTE = "biomechanics_correspondence_distance"
@@ -23,6 +23,9 @@ REFRESH_INTERVAL = 0.1
 GLOBAL_MAX_TOLERANCE = 0.1
 MATRIX_TOLERANCE = 1e-9
 RAMP_LUT_SIZE = 256
+# Per Bone never stretches below this, so float noise on an aligned pair
+# (around 1e-4 mm) stays blue instead of filling the whole ramp.
+PER_BONE_MIN_SCALE_MM = 0.01
 
 # Near (blue) to far (red), in sRGB.
 RAMP_POSITIONS = np.array((0.0, 0.25, 0.5, 0.75, 1.0))
@@ -40,10 +43,14 @@ _heatmap_active = False
 _pair_distances = {}
 _local_vertices = {}
 _object_matrices = {}
+_object_values = {}
+_overlay_batches = {}
+_overlay_shader = None
 _global_max_mm = None
 _dirty_object_names = set()
 _previous_viewport_color_types = {}
 _draw_handler = None
+_overlay_draw_handler = None
 
 
 def is_heatmap_active():
@@ -60,11 +67,18 @@ def _build_ramp_lut():
 
 
 RAMP_LUT = _build_ramp_lut()
+# The GPU overlay draws display colors directly, so it uses the sRGB ramp.
+RAMP_SRGB_LUT = np.column_stack(
+    [np.interp(np.linspace(0.0, 1.0, RAMP_LUT_SIZE), RAMP_POSITIONS, RAMP_COLORS[:, channel]) for channel in range(3)]
+).astype(np.float32)
+
+
+def _ramp_indices(values):
+    return (np.clip(values, 0.0, 1.0) * (RAMP_LUT_SIZE - 1) + 0.5).astype(np.intp)
 
 
 def _ramp_colors(values):
-    indices = (np.clip(values, 0.0, 1.0) * (RAMP_LUT_SIZE - 1) + 0.5).astype(np.intp)
-    return RAMP_LUT[indices]
+    return RAMP_LUT[_ramp_indices(values)]
 
 
 def _matrix_values(obj):
@@ -190,9 +204,12 @@ def refresh_heatmap(scene, changed_object_names=None):
 
     for original, rigid in rewrite:
         distances = _pair_distances[(original.name, rigid.name)]
-        scale = float(distances.max()) if per_bone else _global_max_mm
+        scale = max(float(distances.max()), PER_BONE_MIN_SCALE_MM) if per_bone else _global_max_mm
         values = distances / scale if scale > 1e-12 else np.zeros_like(distances)
         colors = _ramp_colors(values)
+        for obj in (original, rigid):
+            _object_values[obj.name] = values
+            _overlay_batches.pop(obj.name, None)
         _write_colors(original.data, colors)
         if rigid.data is not original.data:
             _write_colors(rigid.data, colors)
@@ -248,6 +265,8 @@ def enable_heatmap(scene):
     _pair_distances.clear()
     _local_vertices.clear()
     _object_matrices.clear()
+    _object_values.clear()
+    _overlay_batches.clear()
     _global_max_mm = None
     refresh_heatmap(scene)
     # Switch an active transparent comparison to wireframe before taking the viewport.
@@ -267,6 +286,8 @@ def disable_heatmap():
     _pair_distances.clear()
     _local_vertices.clear()
     _object_matrices.clear()
+    _object_values.clear()
+    _overlay_batches.clear()
     _global_max_mm = None
     _restore_meshes()
     _restore_viewport_color_types()
@@ -278,6 +299,96 @@ def update_heatmap_scale(scene, _context):
     if _heatmap_active:
         refresh_heatmap(scene)
         _tag_view_redraw()
+
+
+def _get_overlay_shader():
+    global _overlay_shader
+    if _overlay_shader is None:
+        interface = gpu.types.GPUStageInterfaceInfo("biomechanics_heatmap_interface")
+        interface.smooth("VEC4", "shadedColor")
+        info = gpu.types.GPUShaderCreateInfo()
+        info.push_constant("MAT4", "modelViewProjection")
+        info.push_constant("MAT4", "modelView")
+        info.push_constant("FLOAT", "alpha")
+        info.vertex_in(0, "VEC3", "pos")
+        info.vertex_in(1, "VEC3", "nor")
+        info.vertex_in(2, "VEC3", "color")
+        info.vertex_out(interface)
+        info.fragment_out(0, "VEC4", "fragColor")
+        # Headlight shading keeps the bone's form readable through the transparency.
+        info.vertex_source(
+            "void main() {"
+            "  vec3 viewNormal = normalize(mat3(modelView) * nor);"
+            "  float light = 0.35 + 0.65 * abs(viewNormal.z);"
+            "  shadedColor = vec4(color * light, alpha);"
+            "  gl_Position = modelViewProjection * vec4(pos, 1.0);"
+            "}"
+        )
+        info.fragment_source("void main() { fragColor = shadedColor; }")
+        _overlay_shader = gpu.shader.create_from_info(info)
+    return _overlay_shader
+
+
+def _overlay_batch(obj, shader):
+    batch = _overlay_batches.get(obj.name)
+    if batch is not None:
+        return batch
+    values = _object_values.get(obj.name)
+    coordinates = _local_vertices.get(obj.name)
+    mesh = obj.data
+    vertex_count = len(mesh.vertices)
+    if values is None or coordinates is None or len(coordinates) != vertex_count:
+        return None
+    if len(mesh.loop_triangles) == 0:
+        mesh.calc_loop_triangles()
+    triangles = np.empty(len(mesh.loop_triangles) * 3, dtype=np.int32)
+    mesh.loop_triangles.foreach_get("vertices", triangles)
+    normals = np.empty(vertex_count * 3, dtype=np.float32)
+    mesh.vertices.foreach_get("normal", normals)
+    batch = batch_for_shader(
+        shader,
+        "TRIS",
+        {
+            "pos": coordinates.astype(np.float32),
+            "nor": normals.reshape((-1, 3)),
+            "color": RAMP_SRGB_LUT[_ramp_indices(values)],
+        },
+        indices=triangles.reshape((-1, 3)),
+    )
+    _overlay_batches[obj.name] = batch
+    return batch
+
+
+def _draw_comparison_overlay():
+    if not _heatmap_active:
+        return
+    region_data = bpy.context.region_data
+    scene = bpy.context.scene
+    if region_data is None or scene is None:
+        return
+    objects = [obj for obj in scene.objects if obj.type == "MESH" and PREVIOUS_HIDDEN_KEY in obj]
+    if not objects:
+        return
+
+    shader = _get_overlay_shader()
+    previous_depth_test = gpu.state.depth_test_get()
+    gpu.state.blend_set("ALPHA")
+    gpu.state.depth_mask_set(False)
+    gpu.state.depth_test_set("NONE" if scene.biomechanics_overlay_on_top else "LESS_EQUAL")
+    try:
+        shader.bind()
+        shader.uniform_float("alpha", scene.biomechanics_overlay_opacity)
+        for obj in objects:
+            batch = _overlay_batch(obj, shader)
+            if batch is None:
+                continue
+            shader.uniform_float("modelViewProjection", region_data.perspective_matrix @ obj.matrix_world)
+            shader.uniform_float("modelView", region_data.view_matrix @ obj.matrix_world)
+            batch.draw(shader)
+    finally:
+        gpu.state.blend_set("NONE")
+        gpu.state.depth_mask_set(True)
+        gpu.state.depth_test_set(previous_depth_test)
 
 
 def _smooth_color_shader():
@@ -370,9 +481,13 @@ def _reset_on_load(_dummy):
     _pair_distances.clear()
     _local_vertices.clear()
     _object_matrices.clear()
+    _object_values.clear()
+    _overlay_batches.clear()
     _previous_viewport_color_types.clear()
     _global_max_mm = None
     _restore_meshes()
+    # Unhide comparison meshes saved while drawn by the heatmap overlay.
+    _update_transparency_overlay(bpy.context.scene, None)
 
 
 def _remove_load_handler():
@@ -384,7 +499,11 @@ def _remove_load_handler():
 
 
 def register_heatmap():
-    global _draw_handler
+    global _draw_handler, _overlay_draw_handler
+    if _overlay_draw_handler is None:
+        _overlay_draw_handler = bpy.types.SpaceView3D.draw_handler_add(
+            _draw_comparison_overlay, (), "WINDOW", "POST_VIEW"
+        )
     if _draw_handler is None:
         _draw_handler = bpy.types.SpaceView3D.draw_handler_add(_draw_legend, (), "WINDOW", "POST_PIXEL")
     _remove_load_handler()
@@ -392,8 +511,12 @@ def register_heatmap():
 
 
 def unregister_heatmap():
-    global _draw_handler
+    global _draw_handler, _overlay_draw_handler, _overlay_shader
     disable_heatmap()
+    _overlay_shader = None
+    if _overlay_draw_handler is not None:
+        bpy.types.SpaceView3D.draw_handler_remove(_overlay_draw_handler, "WINDOW")
+        _overlay_draw_handler = None
     if _draw_handler is not None:
         bpy.types.SpaceView3D.draw_handler_remove(_draw_handler, "WINDOW")
         _draw_handler = None

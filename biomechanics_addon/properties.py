@@ -126,13 +126,10 @@ def refresh_transparency_overlay(scene, excluded_pair_name=None):
 
 def _update_transparency_overlay(scene, context):
     selected_object = context.active_object if context is not None else bpy.context.active_object
-    source_collection = scene.biomechanics_source_collection
     excluded_pair_name = None
-    if (
-        selected_object is not None
-        and selected_object.type == "MESH"
-        and source_collection is not None
-        and source_collection.objects.get(selected_object.name) is selected_object
+    if selected_object is not None and selected_object.type == "MESH" and any(
+        collection is not None and collection.objects.get(selected_object.name) is selected_object
+        for collection in (scene.biomechanics_source_collection, scene.biomechanics_target_collection)
     ):
         excluded_pair_name = base_object_name(selected_object.name)
 

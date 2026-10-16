@@ -19,7 +19,7 @@ their displacement relative to the aligned pair.
 
 1. Open **3D Viewport > Sidebar > Biomechanics**.
 2. Choose the **Original** and **Rigid** collections.
-3. Select one mesh object from Original.
+3. Select one mesh object from Original, or its pair in Rigid.
 4. Choose a comparison collection: **None**, **Original**, or **Rigid**.
 5. Optionally use **Mesh Wireframe**, **Overlay Opacity**, and **Overlay On Top**.
 6. Select **Align to Source**.
@@ -33,7 +33,8 @@ Collection picker stored in `Scene.biomechanics_source_collection`.
 
 - Contains the model that will be moved by **Align to Source**.
 - Defaults to the collection named `Collection` when available.
-- A valid selected alignment object must be a mesh directly in this collection.
+- A valid selected alignment object must be a mesh directly in this collection, or a
+  Rigid mesh, which stands for its unique Original pair.
 - Changing the collection refreshes and safely restores the comparison display.
 
 ### Rigid
@@ -101,7 +102,9 @@ Blender ID: `biomechanics.align_to_source`.
 Behavior:
 
 1. Validate that Original and Rigid are selected and different.
-2. Validate that the active object is a mesh in Original.
+2. Validate that the active object is a mesh in Original or Rigid. A Rigid mesh is
+   replaced by its unique Original pair (same suffix-removal rule); missing or
+   ambiguous Original pairs are rejected.
 3. Pair it with one Rigid mesh by removing one Blender numeric suffix such as
    `.001` or `.002` and comparing the remaining names.
 4. Reject missing or ambiguous pairs.
@@ -138,17 +141,22 @@ Panel: **Point Correspondence**. Module: `biomechanics_addon/correspondence.py`.
   `biomechanics_correspondence_distance` to both meshes of every pair (blue near ->
   red far) and switches solid viewports to Attribute color (`color_type = "VERTEX"`).
   **All Bones** scales red to the global maximum; **Per Bone** (`Scene.biomechanics_heatmap_scale`)
-  scales to each pair's own maximum. A depsgraph handler marks a mesh dirty only when
+  scales to each pair's own maximum, never below 0.01 mm so an aligned pair's
+  float noise (~1e-4 mm) stays blue. A depsgraph handler marks a mesh dirty only when
   its `matrix_world` actually differs from the cached one (bone-parented Rigid meshes
   report `is_updated_transform` on every evaluation, so the flag alone causes a
   refresh loop), and a 0.1 s timer recomputes only those pairs from cached local
   vertices (all pairs when the global maximum shifts by more than 10%). Off, unregister, and file load remove the attribute, restore each
   mesh's previous active/render color attribute from `_biomechanics_previous_*`
   mesh properties, and restore viewport color modes. Workbench honors object alpha
-  only in Object color mode (verified by render), so while the heatmap is on,
-  `refresh_transparency_overlay` draws the comparison collection as wireframe and
-  leaves the viewport color mode to the heatmap; the Opacity slider is disabled.
-  Turning the heatmap off reapplies the comparison display, restoring transparency.
+  only in Object color mode (verified by render), so while the heatmap is on and
+  Mesh Wireframe is off, `refresh_transparency_overlay` hides comparison meshes with
+  `hide_set(True)` (prior state in `_biomechanics_previous_hidden`) and leaves the
+  viewport color mode to the heatmap. A `POST_VIEW` handler in `distance_heatmap.py`
+  redraws those meshes with a custom headlight GPU shader in heatmap colors at
+  Overlay Opacity, honoring Overlay On Top (depth test off). Hidden comparison meshes
+  are not hit by Hover Correspondence ray casts. Turning the heatmap off reapplies the
+  normal transparent comparison display.
 
 ## Core Functions
 
@@ -197,7 +205,7 @@ This restoration must run when:
 
 ### `properties._update_transparency_overlay(scene, context)`
 
-Blender property update callback. It finds an active Original mesh, derives its base
+Blender property update callback. It finds an active Original or Rigid mesh, derives its base
 pair name, and calls the central refresh while excluding that pair.
 
 ### `register_properties()` / `unregister_properties()`
