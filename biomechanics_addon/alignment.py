@@ -8,10 +8,16 @@ def base_object_name(name):
     return re.sub(r"\.\d{3}$", "", name)
 
 
-def world_vertices(obj):
-    coordinates = np.empty(len(obj.data.vertices) * 3, dtype=np.float64)
+def local_vertices(obj):
+    # Matching Blender's float32 storage keeps foreach_get on its fast path.
+    coordinates = np.empty(len(obj.data.vertices) * 3, dtype=np.float32)
     obj.data.vertices.foreach_get("co", coordinates)
-    coordinates = coordinates.reshape((-1, 3))
+    return coordinates.reshape((-1, 3)).astype(np.float64)
+
+
+def world_vertices(obj, coordinates=None):
+    if coordinates is None:
+        coordinates = local_vertices(obj)
 
     world_matrix = np.array(obj.matrix_world, dtype=np.float64)
     return coordinates @ world_matrix[:3, :3].T + world_matrix[:3, 3]

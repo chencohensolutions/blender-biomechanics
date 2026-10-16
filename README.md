@@ -16,7 +16,7 @@ next-session development priorities.
 3. In VS Code, press `Ctrl+Shift+B` and select **Blender: Run Add-on from Source**.
 4. In Blender's 3D Viewport, press `N` and open the **Biomechanics** tab.
 
-The task starts Blender and registers `biomechanics_addon` directly from this checkout; no ZIP rebuild or installation is needed. After editing the source while Blender remains open, switch to the **Scripting** workspace, open `tools/dev_load.py`, and press `Alt+P` to reload the add-on.
+The task starts Blender and registers `biomechanics_addon` directly from this checkout; no ZIP rebuild or installation is needed. After editing the source while Blender remains open, run the VS Code task **Blender: Reload Add-on** (Command Palette > **Tasks: Run Task**). It touches `tools/.reload_request`; a timer installed by `tools/dev_load.py` notices the change within half a second and reloads the add-on. As a fallback, switch to the **Scripting** workspace, open `tools/dev_load.py`, and press `Alt+P` (`Option+P` on macOS).
 
 ### macOS
 

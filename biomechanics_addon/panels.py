@@ -1,6 +1,15 @@
 import bpy  # pyright: ignore[reportMissingImports]
 import textwrap
 
+from .correspondence import (
+    MAX_RESULTS_SHOWN,
+    BIOMECHANICS_OT_clear_correspondence_max,
+    BIOMECHANICS_OT_find_max_correspondence_distance,
+    BIOMECHANICS_OT_toggle_correspondence_hover,
+    is_hover_active,
+    max_distance_results,
+)
+from .distance_heatmap import BIOMECHANICS_OT_toggle_distance_heatmap, is_heatmap_active
 from .onnx_compat import BIOMECHANICS_OT_check_onnx_compatibility
 from .operators import (
     BIOMECHANICS_OT_align_to_source,
@@ -107,6 +116,53 @@ class BIOMECHANICS_PT_display_panel(bpy.types.Panel):
             text="Overlay On Top",
             toggle=True,
         )
+
+
+class BIOMECHANICS_PT_correspondence_panel(bpy.types.Panel):
+    bl_label = "Point Correspondence"
+    bl_idname = "BIOMECHANICS_PT_correspondence_panel"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Biomechanics"
+    bl_parent_id = BIOMECHANICS_PT_main_panel.bl_idname
+
+    def draw(self, context):
+        layout = self.layout
+        hover_active = is_hover_active()
+        layout.operator(
+            BIOMECHANICS_OT_toggle_correspondence_hover.bl_idname,
+            text="Hover Correspondence: On" if hover_active else "Hover Correspondence: Off",
+            icon="RESTRICT_SELECT_OFF" if hover_active else "RESTRICT_SELECT_ON",
+            depress=hover_active,
+        )
+        row = layout.row(align=True)
+        row.operator(
+            BIOMECHANICS_OT_find_max_correspondence_distance.bl_idname,
+            icon="DRIVER_DISTANCE",
+        )
+        row.operator(
+            BIOMECHANICS_OT_clear_correspondence_max.bl_idname,
+            text="",
+            icon="X",
+        )
+        heatmap_active = is_heatmap_active()
+        layout.operator(
+            BIOMECHANICS_OT_toggle_distance_heatmap.bl_idname,
+            text="Distance Heatmap: On" if heatmap_active else "Distance Heatmap: Off",
+            icon="COLOR",
+            depress=heatmap_active,
+        )
+        scale_row = layout.row()
+        scale_row.enabled = heatmap_active
+        scale_row.prop(context.scene, "biomechanics_heatmap_scale", expand=True)
+        results = max_distance_results()
+        if results:
+            column = layout.column(align=True)
+            for index, result in enumerate(results[:MAX_RESULTS_SHOWN]):
+                column.label(
+                    text=f"{result['original']}: {result['distance_mm']:.3f} mm (v{result['vertex_index']})",
+                    icon="ERROR" if index == 0 else "DOT",
+                )
 
 
 class BIOMECHANICS_PT_interaction_panel(bpy.types.Panel):

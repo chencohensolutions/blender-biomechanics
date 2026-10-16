@@ -11,3 +11,4 @@ biomechanics_training/
 **/model/model_manifest.json
 **/model/metrics.json
 **/model/*.data
+tools/.reload_request

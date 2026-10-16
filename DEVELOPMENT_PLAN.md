@@ -116,6 +116,40 @@ Behavior:
 11. Refresh the comparison display and exclude the newly aligned pair.
 12. Report the moved object count. The operator supports Blender Undo.
 
+### Point Correspondence
+
+Panel: **Point Correspondence**. Module: `biomechanics_addon/correspondence.py`.
+
+- **Hover Correspondence** (`biomechanics.toggle_correspondence_hover`) toggles a
+  pass-through modal operator. Under the mouse it ray-casts the scene; for a hit on
+  an Original or Rigid mesh it finds the unique pair by `base_object_name`, maps the
+  hit to the pair with `poly_3d_calc` weights over the shared polygon vertex indices,
+  and draws both points, a connecting line, and the world distance in millimeters.
+  It changes no scene data. Topology-changing modifiers break the face-index mapping.
+- **Find Max Distance Point** (`biomechanics.find_max_correspondence_distance`)
+  compares every Original mesh with its Rigid pair vertex-by-vertex in world space,
+  ranks pairs by their largest vertex distance, marks the overall maximum in the
+  viewport, and lists the top five pairs. Results are in-memory only and cleared by
+  the X button, file load, or unregister.
+- One `POST_PIXEL` draw handler serves both overlays; it is added on register and
+  removed on unregister.
+- **Distance Heatmap** (`biomechanics.toggle_distance_heatmap`, module
+  `distance_heatmap.py`) writes a temporary point-domain `FLOAT_COLOR` attribute
+  `biomechanics_correspondence_distance` to both meshes of every pair (blue near ->
+  red far) and switches solid viewports to Attribute color (`color_type = "VERTEX"`).
+  **All Bones** scales red to the global maximum; **Per Bone** (`Scene.biomechanics_heatmap_scale`)
+  scales to each pair's own maximum. A depsgraph handler marks a mesh dirty only when
+  its `matrix_world` actually differs from the cached one (bone-parented Rigid meshes
+  report `is_updated_transform` on every evaluation, so the flag alone causes a
+  refresh loop), and a 0.1 s timer recomputes only those pairs from cached local
+  vertices (all pairs when the global maximum shifts by more than 10%). Off, unregister, and file load remove the attribute, restore each
+  mesh's previous active/render color attribute from `_biomechanics_previous_*`
+  mesh properties, and restore viewport color modes. Workbench honors object alpha
+  only in Object color mode (verified by render), so while the heatmap is on,
+  `refresh_transparency_overlay` draws the comparison collection as wireframe and
+  leaves the viewport color mode to the heatmap; the Opacity slider is disabled.
+  Turning the heatmap off reapplies the comparison display, restoring transparency.
+
 ## Core Functions
 
 ### `alignment.base_object_name(name)`
@@ -181,6 +215,10 @@ order and unregister them in reverse order, preserving Blender add-on convention
 
 - `biomechanics_addon/__init__.py`: metadata and add-on lifecycle.
 - `biomechanics_addon/alignment.py`: pairing helpers and geometry math.
+- `biomechanics_addon/correspondence.py`: paired-point hover overlay and maximum
+   corresponding-vertex distance search.
+- `biomechanics_addon/distance_heatmap.py`: temporary per-vertex distance heatmap and
+   viewport legend.
 - `biomechanics_addon/dataset_io.py`: bpy-free chunked NPZ dataset serialization.
 - `biomechanics_addon/interaction.py`: target-driven constrained transforms.
 - `biomechanics_addon/neural_geometry.py`: evaluated mesh geometry and neural pose-labeling helpers.

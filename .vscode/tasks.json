@@ -35,6 +35,35 @@
             }
         },
         {
+            "label": "Blender: Reload Add-on",
+            "type": "shell",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile",
+                "-Command",
+                "(Get-Date).ToString('o') | Set-Content -Path '${workspaceFolder}\\tools\\.reload_request'"
+            ],
+            "osx": {
+                "command": "/bin/sh",
+                "args": [
+                    "-c",
+                    "date > \"${workspaceFolder}/tools/.reload_request\""
+                ]
+            },
+            "linux": {
+                "command": "/bin/sh",
+                "args": [
+                    "-c",
+                    "date > \"${workspaceFolder}/tools/.reload_request\""
+                ]
+            },
+            "problemMatcher": [],
+            "presentation": {
+                "reveal": "silent",
+                "panel": "shared"
+            }
+        },
+        {
             "label": "Blender: Open Add-on Reload Script",
             "type": "shell",
             "command": "code",

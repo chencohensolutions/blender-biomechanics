@@ -7,6 +7,8 @@ PREVIOUS_ALPHA_KEY = "_biomechanics_previous_alpha"
 PREVIOUS_TRANSPARENCY_KEY = "_biomechanics_previous_transparency"
 PREVIOUS_IN_FRONT_KEY = "_biomechanics_previous_in_front"
 PREVIOUS_DISPLAY_TYPE_KEY = "_biomechanics_previous_display_type"
+# Marks comparison meshes hidden while distance_heatmap draws them semi-transparent.
+PREVIOUS_HIDDEN_KEY = "_biomechanics_previous_hidden"
 _previous_viewport_color_modes = {}
 
 
@@ -38,6 +40,12 @@ def _restore_viewport_color_modes():
 
 def _restore_transparency_overlay():
     for obj in bpy.data.objects:
+        if PREVIOUS_HIDDEN_KEY in obj:
+            try:
+                obj.hide_set(bool(obj[PREVIOUS_HIDDEN_KEY]))
+            except RuntimeError:
+                pass
+            del obj[PREVIOUS_HIDDEN_KEY]
         if PREVIOUS_ALPHA_KEY not in obj:
             continue
 
@@ -55,8 +63,19 @@ def _restore_transparency_overlay():
     _restore_viewport_color_modes()
 
 
+def _heatmap_active():
+    # Imported lazily: distance_heatmap imports this module.
+    from .distance_heatmap import is_heatmap_active
+
+    return is_heatmap_active()
+
+
 def refresh_transparency_overlay(scene, excluded_pair_name=None):
     _restore_transparency_overlay()
+    # Solid-mode object transparency requires Object color, which would hide the
+    # heatmap's Attribute colors. With the heatmap on, transparent comparison meshes
+    # are hidden and distance_heatmap draws them semi-transparent itself.
+    heatmap_overlay = not scene.biomechanics_overlay_wireframe and _heatmap_active()
 
     mode = scene.biomechanics_transparency_mode
     if mode == "NONE":
@@ -73,6 +92,13 @@ def refresh_transparency_overlay(scene, excluded_pair_name=None):
             continue
         if base_object_name(obj.name) == excluded_pair_name:
             continue
+        if heatmap_overlay:
+            try:
+                obj[PREVIOUS_HIDDEN_KEY] = obj.hide_get()
+                obj.hide_set(True)
+            except RuntimeError:
+                obj.pop(PREVIOUS_HIDDEN_KEY, None)
+            continue
 
         obj[PREVIOUS_ALPHA_KEY] = obj.color[3]
         obj[PREVIOUS_TRANSPARENCY_KEY] = obj.show_transparent
@@ -88,7 +114,7 @@ def refresh_transparency_overlay(scene, excluded_pair_name=None):
         if scene.biomechanics_overlay_on_top:
             obj.show_in_front = True
 
-    if scene.biomechanics_overlay_wireframe:
+    if scene.biomechanics_overlay_wireframe or heatmap_overlay:
         return
 
     for space in _view_3d_spaces():
@@ -113,7 +139,23 @@ def _update_transparency_overlay(scene, context):
     refresh_transparency_overlay(scene, excluded_pair_name)
 
 
+def _update_heatmap_scale(scene, context):
+    from .distance_heatmap import update_heatmap_scale
+
+    update_heatmap_scale(scene, context)
+
+
 def register_properties():
+    bpy.types.Scene.biomechanics_heatmap_scale = bpy.props.EnumProperty(
+        name="Heatmap Scale",
+        description="Which maximum distance maps to red in the correspondence heatmap",
+        items=(
+            ("GLOBAL", "All Bones", "Red is the largest distance across all pairs, so bones are comparable"),
+            ("PER_BONE", "Per Bone", "Red is each pair's own largest distance, showing the gradient within every bone"),
+        ),
+        default="GLOBAL",
+        update=_update_heatmap_scale,
+    )
     bpy.types.Scene.biomechanics_training_fixed_object = bpy.props.PointerProperty(
         name="Fixed Bone",
         description="Rigid mesh that remains fixed during geometric training",
@@ -376,3 +418,4 @@ def unregister_properties():
     del bpy.types.Scene.biomechanics_training_seed
     del bpy.types.Scene.biomechanics_training_moving_object
     del bpy.types.Scene.biomechanics_training_fixed_object
+    del bpy.types.Scene.biomechanics_heatmap_scale

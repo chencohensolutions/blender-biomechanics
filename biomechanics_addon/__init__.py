@@ -10,6 +10,14 @@ bl_info = {
 
 import bpy  # pyright: ignore[reportMissingImports]
 
+from .correspondence import (
+    BIOMECHANICS_OT_clear_correspondence_max,
+    BIOMECHANICS_OT_find_max_correspondence_distance,
+    BIOMECHANICS_OT_toggle_correspondence_hover,
+    register_correspondence,
+    unregister_correspondence,
+)
+from .distance_heatmap import BIOMECHANICS_OT_toggle_distance_heatmap, register_heatmap, unregister_heatmap
 from .interaction import register_interaction, unregister_interaction
 from .neural_constraints import clear_session_cache
 from .onnx_compat import BIOMECHANICS_OT_check_onnx_compatibility
@@ -30,6 +38,7 @@ from .operators import (
     shutdown_neural_training,
 )
 from .panels import (
+    BIOMECHANICS_PT_correspondence_panel,
     BIOMECHANICS_PT_display_panel,
     BIOMECHANICS_PT_interaction_panel,
     BIOMECHANICS_PT_neural_dataset_panel,
@@ -56,9 +65,14 @@ CLASSES = (
     BIOMECHANICS_OT_reset_interaction,
     BIOMECHANICS_OT_stop_interaction,
     BIOMECHANICS_OT_align_to_source,
+    BIOMECHANICS_OT_toggle_correspondence_hover,
+    BIOMECHANICS_OT_find_max_correspondence_distance,
+    BIOMECHANICS_OT_clear_correspondence_max,
+    BIOMECHANICS_OT_toggle_distance_heatmap,
     BIOMECHANICS_PT_main_panel,
     BIOMECHANICS_PT_setup_panel,
     BIOMECHANICS_PT_display_panel,
+    BIOMECHANICS_PT_correspondence_panel,
     BIOMECHANICS_PT_interaction_panel,
     BIOMECHANICS_PT_neural_dataset_panel,
     BIOMECHANICS_PT_neural_model_panel,
@@ -71,10 +85,14 @@ def register():
 
     register_properties()
     register_interaction()
+    register_correspondence()
+    register_heatmap()
 
 
 def unregister():
     shutdown_neural_training()
+    unregister_heatmap()
+    unregister_correspondence()
     unregister_interaction()
     unregister_properties()
     clear_session_cache()
