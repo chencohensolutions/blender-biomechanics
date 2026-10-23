@@ -158,6 +158,38 @@ Panel: **Point Correspondence**. Module: `biomechanics_addon/correspondence.py`.
   are not hit by Hover Correspondence ray casts. Turning the heatmap off reapplies the
   normal transparent comparison display.
 
+### Muscle Strings
+
+Panel: **Muscle Strings**. Modules: `biomechanics_addon/muscle_atlas.py` (bpy-free
+attachment data) and `biomechanics_addon/muscle_strings.py`. Anatomical reference and
+the list of muscles left out: [MUSCLE_ATTACHMENTS.md](MUSCLE_ATTACHMENTS.md).
+
+- **Build Muscle Strings** (`biomechanics.build_muscle_strings`) detects landmark
+  vertices on the Original bones in a body frame derived from the skeleton (sacrum,
+  T01, both femurs), then creates one string per muscle attachment in a new
+  collection `<collection> muscles` for Original and again for Rigid, reusing the
+  same vertex indices on the paired Rigid meshes. Every string connects bones of one
+  collection. Rebuilding replaces only collections tagged with
+  `biomechanics_muscle_bones`. Supports Undo.
+- Strings are 3D poly curves (0.6 mm bevel, material per muscle group) with one Hook
+  modifier per control point to its bone, so they stretch when bones move. Each
+  string stores muscle, side, index, and `[bone, vertex index]` attachments as JSON in
+  `biomechanics_muscle_string`.
+- Length is always recomputed from the attachment vertices in world space (polyline
+  through via points), in millimeters through the scene unit scale, never from the
+  evaluated curve.
+- **Hover Muscle Lengths** (`biomechanics.toggle_muscle_hover`) is a pass-through
+  modal operator. It projects every visible string to the region and picks the
+  nearest within 8 px (scaled by UI scale); the `POST_PIXEL` overlay highlights it
+  and shows its length and the matching Original/Rigid string's length and delta.
+  Visibility is checked through object and layer-collection flags because
+  `Object.visible_get()` returns False from a 3D-view context in Blender 5.x.
+- **Export Muscle Lengths** (`biomechanics.export_muscle_lengths`) writes one CSV row
+  per string with both lengths, delta in mm, and delta in percent.
+- Landmarks are approximations (extreme vertex along a direction within optional
+  bone bands). Absolute lengths are approximate; Original/Rigid deltas use identical
+  points. Strings do not wrap bone surfaces except at explicit via points.
+
 ## Core Functions
 
 ### `alignment.base_object_name(name)`
@@ -225,6 +257,9 @@ order and unregister them in reverse order, preserving Blender add-on convention
 - `biomechanics_addon/alignment.py`: pairing helpers and geometry math.
 - `biomechanics_addon/correspondence.py`: paired-point hover overlay and maximum
    corresponding-vertex distance search.
+- `biomechanics_addon/muscle_atlas.py`: bpy-free muscle attachment and landmark data.
+- `biomechanics_addon/muscle_strings.py`: muscle string building, length measurement,
+   hover overlay, and CSV export.
 - `biomechanics_addon/distance_heatmap.py`: temporary per-vertex distance heatmap and
    viewport legend.
 - `biomechanics_addon/dataset_io.py`: bpy-free chunked NPZ dataset serialization.

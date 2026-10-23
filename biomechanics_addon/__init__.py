@@ -19,6 +19,14 @@ from .correspondence import (
 )
 from .distance_heatmap import BIOMECHANICS_OT_toggle_distance_heatmap, register_heatmap, unregister_heatmap
 from .interaction import register_interaction, unregister_interaction
+from .muscle_strings import (
+    BIOMECHANICS_OT_build_muscle_strings,
+    BIOMECHANICS_OT_export_muscle_lengths,
+    BIOMECHANICS_OT_remove_muscle_strings,
+    BIOMECHANICS_OT_toggle_muscle_hover,
+    register_muscle_strings,
+    unregister_muscle_strings,
+)
 from .neural_constraints import clear_session_cache
 from .onnx_compat import BIOMECHANICS_OT_check_onnx_compatibility
 from .operators import (
@@ -43,6 +51,7 @@ from .panels import (
     BIOMECHANICS_PT_interaction_panel,
     BIOMECHANICS_PT_neural_dataset_panel,
     BIOMECHANICS_PT_main_panel,
+    BIOMECHANICS_PT_muscle_panel,
     BIOMECHANICS_PT_neural_model_panel,
     BIOMECHANICS_PT_setup_panel,
 )
@@ -69,10 +78,15 @@ CLASSES = (
     BIOMECHANICS_OT_find_max_correspondence_distance,
     BIOMECHANICS_OT_clear_correspondence_max,
     BIOMECHANICS_OT_toggle_distance_heatmap,
+    BIOMECHANICS_OT_build_muscle_strings,
+    BIOMECHANICS_OT_remove_muscle_strings,
+    BIOMECHANICS_OT_toggle_muscle_hover,
+    BIOMECHANICS_OT_export_muscle_lengths,
     BIOMECHANICS_PT_main_panel,
     BIOMECHANICS_PT_setup_panel,
     BIOMECHANICS_PT_display_panel,
     BIOMECHANICS_PT_correspondence_panel,
+    BIOMECHANICS_PT_muscle_panel,
     BIOMECHANICS_PT_interaction_panel,
     BIOMECHANICS_PT_neural_dataset_panel,
     BIOMECHANICS_PT_neural_model_panel,
@@ -87,10 +101,12 @@ def register():
     register_interaction()
     register_correspondence()
     register_heatmap()
+    register_muscle_strings()
 
 
 def unregister():
     shutdown_neural_training()
+    unregister_muscle_strings()
     unregister_heatmap()
     unregister_correspondence()
     unregister_interaction()

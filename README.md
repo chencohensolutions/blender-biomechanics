@@ -75,6 +75,8 @@ files when diagnosing a run.
 - `biomechanics_addon/__init__.py`: add-on metadata, class order, and registration lifecycle.
 - `biomechanics_addon/alignment.py`: mesh comparison and rigid-transform math.
 - `biomechanics_addon/interaction.py`: live target-based constrained transforms.
+- `biomechanics_addon/muscle_atlas.py`: muscle attachment data; see [MUSCLE_ATTACHMENTS.md](MUSCLE_ATTACHMENTS.md).
+- `biomechanics_addon/muscle_strings.py`: muscle strings between bones, hover lengths, and CSV export.
 - `biomechanics_addon/neural_geometry.py`: evaluated mesh geometry and pose labeling helpers.
 - `biomechanics_addon/neural_training.py`: bpy-free launch, status, and artifact helpers.
 - `biomechanics_addon/operators.py`: user actions and input validation.

@@ -10,6 +10,14 @@ from .correspondence import (
     max_distance_results,
 )
 from .distance_heatmap import BIOMECHANICS_OT_toggle_distance_heatmap, is_heatmap_active
+from .muscle_strings import (
+    BIOMECHANICS_OT_build_muscle_strings,
+    BIOMECHANICS_OT_export_muscle_lengths,
+    BIOMECHANICS_OT_remove_muscle_strings,
+    BIOMECHANICS_OT_toggle_muscle_hover,
+    is_hover_active as is_muscle_hover_active,
+    muscle_collections,
+)
 from .onnx_compat import BIOMECHANICS_OT_check_onnx_compatibility
 from .operators import (
     BIOMECHANICS_OT_align_to_source,
@@ -163,6 +171,31 @@ class BIOMECHANICS_PT_correspondence_panel(bpy.types.Panel):
                     text=f"{result['original']}: {result['distance_mm']:.3f} mm (v{result['vertex_index']})",
                     icon="ERROR" if index == 0 else "DOT",
                 )
+
+
+class BIOMECHANICS_PT_muscle_panel(bpy.types.Panel):
+    bl_label = "Muscle Strings"
+    bl_idname = "BIOMECHANICS_PT_muscle_panel"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Biomechanics"
+    bl_parent_id = BIOMECHANICS_PT_main_panel.bl_idname
+
+    def draw(self, context):
+        layout = self.layout
+        row = layout.row(align=True)
+        row.operator(BIOMECHANICS_OT_build_muscle_strings.bl_idname, icon="CURVE_PATH")
+        row.operator(BIOMECHANICS_OT_remove_muscle_strings.bl_idname, text="", icon="X")
+        hover_active = is_muscle_hover_active()
+        layout.operator(
+            BIOMECHANICS_OT_toggle_muscle_hover.bl_idname,
+            text="Hover Muscle Lengths: On" if hover_active else "Hover Muscle Lengths: Off",
+            icon="RESTRICT_SELECT_OFF" if hover_active else "RESTRICT_SELECT_ON",
+            depress=hover_active,
+        )
+        layout.operator(BIOMECHANICS_OT_export_muscle_lengths.bl_idname, icon="EXPORT")
+        for bones, collection in sorted(muscle_collections(context.scene).items()):
+            layout.label(text=f"{bones}: {len(collection.objects)} strings", icon="DOT")
 
 
 class BIOMECHANICS_PT_interaction_panel(bpy.types.Panel):
