@@ -171,7 +171,7 @@ def register_properties():
     )
     bpy.types.Scene.biomechanics_muscle_delta_range = bpy.props.FloatProperty(
         name="Color Range",
-        description="Length change that maps to full blue (shorter) or full red (longer)",
+        description="Length change that maps to full red (shorter) or full blue (longer)",
         default=10.0,
         min=0.1,
         soft_max=50.0,
@@ -179,7 +179,7 @@ def register_properties():
     )
     bpy.types.Scene.biomechanics_muscle_sheet_range = bpy.props.FloatProperty(
         name="Sheet Range %",
-        description="Triangle area change in percent that maps to full blue (smaller) or full red (larger)",
+        description="Triangle area change in percent that maps to full red (smaller) or full blue (larger)",
         default=20.0,
         min=0.1,
         soft_max=100.0,

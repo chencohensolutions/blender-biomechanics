@@ -35,6 +35,7 @@ LANDMARKS = {
     "rib": {
         "tubercle": ((-1.0, 0.0, 0.0), {"L": (0.0, 0.3)}),
         "angle": ((-1.0, 0.25, 0.0), {}),
+        "posterolateral": ((-0.5, 1.0, 0.0), {}),
         "lateral": ((0.0, 1.0, 0.0), {}),
         "anterolateral": ((0.6, 0.8, 0.0), {}),
         "anterior": ((1.0, 0.0, 0.0), {}),
@@ -69,6 +70,9 @@ LANDMARKS = {
         "pubic_body_inferior": ((0.3, -0.6, -0.8), {}),
         "ischial_spine": ((-0.5, -0.8, 0.0), {"S": (0.25, 0.5)}),
         "ischial_tuberosity": ((-0.5, 0.2, -0.8), {}),
+        "lesser_sciatic_notch": ((-1.0, -0.3, 0.0), {"S": (0.12, 0.25)}),
+        "obturator_inner": ((0.0, -1.0, 0.0), {"S": (0.12, 0.3), "L": (0.15, 0.4)}),
+        "obturator_outer": ((0.3, 1.0, -0.3), {"S": (0.1, 0.3), "L": (0.2, 0.5), "A": (0.5, 0.9)}),
     },
     "femur": {
         "greater_trochanter": ((0.0, 1.0, 0.3), {"S": (0.7, 1.0)}),
@@ -134,7 +138,28 @@ def _paired_muscles():
         ]
 
     def longissimus_thoracis(side):
-        return [(f"{v} transverse", _string(("sacrum", "posterolateral"), (v, "transverse"))) for v in SPINE]
+        strings = [(f"{v} transverse", _string(("sacrum", "posterolateral"), (v, "transverse"))) for v in SPINE]
+        strings += [(f"rib {r}", _string(("sacrum", "posterolateral"), (_rib(r, side), "tubercle"))) for r in range(3, 13)]
+        return strings
+
+    def iliocostalis_lumborum_lumbar(side):
+        return [
+            (f"{v} transverse", _string((f"ilium {side}", "psis"), (v, "transverse")))
+            for v in LUMBAR[:4]
+        ]
+
+    def rotatores_lumborum(side):
+        levels = ("T12",) + LUMBAR
+        return [
+            (f"{levels[i]} -> {levels[i - 1]}", _string((levels[i], "transverse"), (levels[i - 1], "lamina")))
+            for i in range(1, len(levels))
+        ]
+
+    def intertransversarii_thoracis(side):
+        return [
+            (f"T{level:02d} -> T{level + 1:02d}", _string((f"T{level:02d}", "transverse"), (f"T{level + 1:02d}", "transverse")))
+            for level in (10, 11)
+        ]
 
     def spinalis_thoracis(side):
         origins = {1: "L2", 2: "L2", 3: "L1", 4: "L1", 5: "T12", 6: "T12", 7: "T11", 8: "T11"}
@@ -214,6 +239,40 @@ def _paired_muscles():
             (f"rib {r} -> {r + 1}", _string((_rib(r, side), "anterolateral"), (_rib(r + 1, side), "anterolateral")))
             for r in range(1, 12)
         ]
+
+    def innermost_intercostals(side):
+        return [
+            (f"rib {r} -> {r + 1}", _string((_rib(r, side), "posterolateral"), (_rib(r + 1, side), "posterolateral")))
+            for r in range(2, 12)
+        ]
+
+    def levatores_costarum_longi(side):
+        return [
+            (f"T{r:02d} -> rib {r + 2}", _string((f"T{r:02d}", "transverse"), (_rib(r + 2, side), "tubercle")))
+            for r in range(7, 11)
+        ]
+
+    def transversus_abdominis(side):
+        pecten = (f"ilium {side}", "pecten_pubis")
+        return [
+            ("iliac crest", _string((f"ilium {side}", "crest_anterior"), pecten)),
+            ("ASIS", _string((f"ilium {side}", "asis"), pecten)),
+        ]
+
+    def obturator_internus(side):
+        return [
+            (
+                "obturator margin",
+                _string(
+                    (f"ilium {side}", "obturator_inner"),
+                    (f"femur {side}", "trochanteric_fossa"),
+                    via=((f"ilium {side}", "lesser_sciatic_notch"),),
+                ),
+            )
+        ]
+
+    def obturator_externus(side):
+        return [("obturator margin", _string((f"ilium {side}", "obturator_outer"), (f"femur {side}", "trochanteric_fossa")))]
 
     def levatores_costarum(side):
         return [
@@ -323,20 +382,26 @@ def _paired_muscles():
 
     yield "iliocostalis_lumborum", "Iliocostalis lumborum", "erector_spinae", iliocostalis_lumborum
     yield "iliocostalis_thoracis", "Iliocostalis thoracis", "erector_spinae", iliocostalis_thoracis
+    yield "iliocostalis_lumborum_lumbar", "Iliocostalis lumborum (lumbar part)", "erector_spinae", iliocostalis_lumborum_lumbar
     yield "longissimus_thoracis", "Longissimus thoracis", "erector_spinae", longissimus_thoracis
     yield "spinalis_thoracis", "Spinalis thoracis", "erector_spinae", spinalis_thoracis
     yield "semispinalis_thoracis", "Semispinalis thoracis", "transversospinalis", semispinalis_thoracis
     yield "multifidus", "Multifidus", "transversospinalis", multifidus
     yield "rotatores_brevis", "Rotatores brevis", "transversospinalis", rotatores_brevis
     yield "rotatores_longus", "Rotatores longus", "transversospinalis", rotatores_longus
+    yield "rotatores_lumborum", "Rotatores lumborum", "transversospinalis", rotatores_lumborum
     yield "intertransversarii_lumborum", "Intertransversarii lumborum", "deep_back", intertransversarii_lumborum
+    yield "intertransversarii_thoracis", "Intertransversarii thoracis", "deep_back", intertransversarii_thoracis
     yield "quadratus_lumborum", "Quadratus lumborum", "deep_back", quadratus_lumborum
     yield "rectus_abdominis", "Rectus abdominis", "abdominal", rectus_abdominis
     yield "external_oblique", "External oblique", "abdominal", external_oblique
     yield "internal_oblique", "Internal oblique", "abdominal", internal_oblique
+    yield "transversus_abdominis", "Transversus abdominis", "abdominal", transversus_abdominis
     yield "external_intercostals", "External intercostals", "thoracic", external_intercostals
     yield "internal_intercostals", "Internal intercostals", "thoracic", internal_intercostals
-    yield "levatores_costarum", "Levatores costarum", "thoracic", levatores_costarum
+    yield "innermost_intercostals", "Innermost intercostals", "thoracic", innermost_intercostals
+    yield "levatores_costarum", "Levatores costarum breves", "thoracic", levatores_costarum
+    yield "levatores_costarum_longi", "Levatores costarum longi", "thoracic", levatores_costarum_longi
     yield "serratus_posterior_superior", "Serratus posterior superior", "thoracic", serratus_posterior_superior
     yield "serratus_posterior_inferior", "Serratus posterior inferior", "thoracic", serratus_posterior_inferior
     yield "transversus_thoracis", "Transversus thoracis", "thoracic", transversus_thoracis
@@ -351,6 +416,8 @@ def _paired_muscles():
     yield "gemellus_superior", "Gemellus superior", "deep_hip", gemellus_superior
     yield "gemellus_inferior", "Gemellus inferior", "deep_hip", gemellus_inferior
     yield "quadratus_femoris", "Quadratus femoris", "deep_hip", quadratus_femoris
+    yield "obturator_internus", "Obturator internus", "deep_hip", obturator_internus
+    yield "obturator_externus", "Obturator externus", "deep_hip", obturator_externus
     yield "pectineus", "Pectineus", "deep_hip", pectineus
     yield "adductor_brevis", "Adductor brevis", "deep_hip", adductor_brevis
     yield "coccygeus", "Coccygeus", "pelvic_floor", coccygeus
@@ -365,7 +432,14 @@ def _midline_muscles():
             for i in range(len(levels) - 1)
         ]
 
+    def interspinales_thoracis(_side):
+        return [
+            (f"{upper} -> {lower}", _string((upper, "spinous"), (lower, "spinous")))
+            for upper, lower in (("T01", "T02"), ("T11", "T12"))
+        ]
+
     yield "interspinales_lumborum", "Interspinales lumborum", "deep_back", interspinales_lumborum
+    yield "interspinales_thoracis", "Interspinales thoracis", "deep_back", interspinales_thoracis
 
 
 def muscle_strings():

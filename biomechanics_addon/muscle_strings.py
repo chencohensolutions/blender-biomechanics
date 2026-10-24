@@ -44,9 +44,9 @@ BUILT_FROM_PROPERTY = "biomechanics_muscle_bones"
 STRING_PROPERTY = "biomechanics_muscle_string"
 
 DELTA_BINS = 21
-DELTA_SHORTER_COLOR = (0.1, 0.35, 1.0)
+DELTA_SHORTER_COLOR = (1.0, 0.15, 0.1)
 DELTA_NEUTRAL_COLOR = (0.82, 0.82, 0.82)
-DELTA_LONGER_COLOR = (1.0, 0.15, 0.1)
+DELTA_LONGER_COLOR = (0.1, 0.35, 1.0)
 DELTA_UNPAIRED_COLOR = (0.25, 0.25, 0.25, 1.0)
 DELTA_REFRESH_INTERVAL = 0.25
 
@@ -391,7 +391,7 @@ def length_delta(source_length, target_length, unit):
 
 
 def _delta_color(t):
-    """Diverging ramp for t in [-1, 1]: blue shorter, gray unchanged, red longer."""
+    """Diverging ramp for t in [-1, 1]: red shorter, gray unchanged, blue longer."""
     end = DELTA_LONGER_COLOR if t > 0.0 else DELTA_SHORTER_COLOR
     weight = min(abs(t), 1.0)
     return tuple(n + (e - n) * weight for n, e in zip(DELTA_NEUTRAL_COLOR, end)) + (1.0,)
@@ -925,7 +925,7 @@ class BIOMECHANICS_OT_toggle_muscle_hover(bpy.types.Operator):
 
 
 class BIOMECHANICS_OT_toggle_muscle_delta_colors(bpy.types.Operator):
-    """Color each muscle string and its twin by length change: blue shorter, red longer"""
+    """Color each muscle string and its twin by length change: red shorter, blue longer"""
 
     bl_idname = "biomechanics.toggle_muscle_delta_colors"
     bl_label = "Length Change Colors"

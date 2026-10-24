@@ -185,8 +185,9 @@ the list of muscles left out: [MUSCLE_ATTACHMENTS.md](MUSCLE_ATTACHMENTS.md).
   Visibility is checked through object and layer-collection flags because
   `Object.visible_get()` returns False from a 3D-view context in Blender 5.x.
 - **Length Change Colors** (`biomechanics.toggle_muscle_delta_colors`) colors each
-  Original/Rigid twin pair by Rigid minus Original length on a diverging ramp: blue
-  shorter, gray unchanged, red longer, with a 21-bin set of shared
+  Original/Rigid twin pair by Rigid minus Original length on a diverging ramp: red
+  shorter, gray unchanged, blue longer (sheets: red smaller, blue larger), with a
+  21-bin set of shared
   `Biomechanics Muscle Delta NN` materials. **Percent** (strain, default) or **mm**
   is chosen by `Scene.biomechanics_muscle_delta_unit`; `Scene.biomechanics_muscle_delta_range`
   (default 10) maps to full color. It sets each string's material slot to
