@@ -19,6 +19,15 @@ from .correspondence import (
 )
 from .distance_heatmap import BIOMECHANICS_OT_toggle_distance_heatmap, register_heatmap, unregister_heatmap
 from .interaction import register_interaction, unregister_interaction
+from .chain_interaction import (
+    BIOMECHANICS_OT_precompute_chain_fields,
+    BIOMECHANICS_OT_select_chain_target,
+    BIOMECHANICS_OT_start_chain,
+    BIOMECHANICS_OT_stop_chain,
+    BIOMECHANICS_OT_toggle_move_bones,
+    register_chain,
+    unregister_chain,
+)
 from .muscle_sheets import BIOMECHANICS_OT_toggle_muscle_sheets
 from .muscle_strings import (
     BIOMECHANICS_OT_build_muscle_strings,
@@ -50,6 +59,7 @@ from .operators import (
 from .panels import (
     BIOMECHANICS_PT_correspondence_panel,
     BIOMECHANICS_PT_display_panel,
+    BIOMECHANICS_PT_chain_panel,
     BIOMECHANICS_PT_interaction_panel,
     BIOMECHANICS_PT_neural_dataset_panel,
     BIOMECHANICS_PT_main_panel,
@@ -86,11 +96,17 @@ CLASSES = (
     BIOMECHANICS_OT_toggle_muscle_delta_colors,
     BIOMECHANICS_OT_toggle_muscle_sheets,
     BIOMECHANICS_OT_export_muscle_lengths,
+    BIOMECHANICS_OT_precompute_chain_fields,
+    BIOMECHANICS_OT_select_chain_target,
+    BIOMECHANICS_OT_start_chain,
+    BIOMECHANICS_OT_stop_chain,
+    BIOMECHANICS_OT_toggle_move_bones,
     BIOMECHANICS_PT_main_panel,
     BIOMECHANICS_PT_setup_panel,
     BIOMECHANICS_PT_display_panel,
     BIOMECHANICS_PT_correspondence_panel,
     BIOMECHANICS_PT_muscle_panel,
+    BIOMECHANICS_PT_chain_panel,
     BIOMECHANICS_PT_interaction_panel,
     BIOMECHANICS_PT_neural_dataset_panel,
     BIOMECHANICS_PT_neural_model_panel,
@@ -106,10 +122,12 @@ def register():
     register_correspondence()
     register_heatmap()
     register_muscle_strings()
+    register_chain()
 
 
 def unregister():
     shutdown_neural_training()
+    unregister_chain()
     unregister_muscle_strings()
     unregister_heatmap()
     unregister_correspondence()

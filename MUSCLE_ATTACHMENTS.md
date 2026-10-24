@@ -82,6 +82,19 @@ lumborum and thoracis on the midline).
 | Pelvic floor | Coccygeus | ischial spine -> lateral lower sacrum / coccyx | 1 |
 | | Levator ani | ischial spine (iliococcygeus), pubis (pubococcygeus) -> coccyx | 2 |
 
+## Ligaments and Discs
+
+Built by **Build Ligaments & Discs** (`ligament_atlas.py`); 54 entries, 369 strings
+per collection. Discs: nucleus (one central spring, stiff) and annulus (6 rim
+springs) at every level T01-T02 ... L5-S1, endplates found as the contact faces of
+neighboring bodies. Spinal ligaments per level: anterior and posterior
+longitudinal, ligamentum flavum, interspinous, supraspinous, intertransverse, facet
+joint capsules; iliolumbar (L4, L5). Pelvis: anterior, interosseous, and posterior
+sacroiliac, sacrotuberous, sacrospinous, pubic symphysis. Hip: iliofemoral (two
+bands), pubofemoral, ischiofemoral, ligament of the femoral head. Costal: radiate
+(rib head to body) and costotransverse (tubercle to transverse process) for ribs
+1-12 (ribs 11-12 have no true costotransverse joint; the strings there are long).
+
 ## Full Muscle Catalog
 
 Named skeletal muscles of the body by region (paired muscles listed once). Status:

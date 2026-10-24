@@ -10,6 +10,18 @@ from .correspondence import (
     max_distance_results,
 )
 from .distance_heatmap import BIOMECHANICS_OT_toggle_distance_heatmap, is_heatmap_active
+from .chain_interaction import (
+    BIOMECHANICS_OT_precompute_chain_fields,
+    BIOMECHANICS_OT_select_chain_target,
+    BIOMECHANICS_OT_start_chain,
+    BIOMECHANICS_OT_stop_chain,
+    BIOMECHANICS_OT_toggle_move_bones,
+    chain_ready,
+    fields_missing,
+    is_active as is_chain_active,
+    is_free_mode,
+    session as chain_session,
+)
 from .muscle_sheets import BIOMECHANICS_OT_toggle_muscle_sheets, sheets_exist
 from .muscle_strings import (
     BIOMECHANICS_OT_build_muscle_strings,
@@ -19,7 +31,7 @@ from .muscle_strings import (
     BIOMECHANICS_OT_toggle_muscle_hover,
     is_delta_active,
     is_hover_active as is_muscle_hover_active,
-    muscle_collections,
+    string_collections,
 )
 from .onnx_compat import BIOMECHANICS_OT_check_onnx_compatibility
 from .operators import (
@@ -187,8 +199,11 @@ class BIOMECHANICS_PT_muscle_panel(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         row = layout.row(align=True)
-        row.operator(BIOMECHANICS_OT_build_muscle_strings.bl_idname, icon="CURVE_PATH")
+        row.operator(BIOMECHANICS_OT_build_muscle_strings.bl_idname, icon="CURVE_PATH").kind = "muscle"
         row.operator(BIOMECHANICS_OT_remove_muscle_strings.bl_idname, text="", icon="X")
+        layout.operator(
+            BIOMECHANICS_OT_build_muscle_strings.bl_idname, text="Build Ligaments & Discs", icon="CONSTRAINT"
+        ).kind = "ligament"
         hover_active = is_muscle_hover_active()
         layout.operator(
             BIOMECHANICS_OT_toggle_muscle_hover.bl_idname,
@@ -218,8 +233,8 @@ class BIOMECHANICS_PT_muscle_panel(bpy.types.Panel):
         sheet_row.enabled = sheets_active
         sheet_row.prop(context.scene, "biomechanics_muscle_sheet_range")
         layout.operator(BIOMECHANICS_OT_export_muscle_lengths.bl_idname, icon="EXPORT")
-        for bones, collection in sorted(muscle_collections(context.scene).items()):
-            layout.label(text=f"{bones}: {len(collection.objects)} strings", icon="DOT")
+        for bones, kind, collection in sorted(string_collections(context.scene)):
+            layout.label(text=f"{bones} {kind}s: {len(collection.objects)}", icon="DOT")
 
 
 class BIOMECHANICS_PT_interaction_panel(bpy.types.Panel):
@@ -295,6 +310,78 @@ class BIOMECHANICS_PT_interaction_panel(bpy.types.Panel):
                 text="Copy Panel Info",
                 icon="COPY_ID",
             )
+
+
+class BIOMECHANICS_PT_chain_panel(bpy.types.Panel):
+    bl_label = "Bone Chain"
+    bl_idname = "BIOMECHANICS_PT_chain_panel"
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "Biomechanics"
+    bl_parent_id = BIOMECHANICS_PT_main_panel.bl_idname
+
+    def draw(self, context):
+        layout = self.layout
+        scene = context.scene
+        active = is_chain_active()
+        free = is_free_mode()
+        ready, reason = chain_ready(scene)
+        layout.operator(
+            BIOMECHANICS_OT_toggle_move_bones.bl_idname,
+            text="Move Bones: On" if free else "Move Bones: Off",
+            icon="VIEW_PAN" if free else "OBJECT_DATAMODE",
+            depress=free,
+        )
+        if free:
+            _wrapped_labels(layout, "Click any vertebra, press G (move) or R (rotate), drag, click to confirm.", "INFO", context)
+        elif not ready:
+            _wrapped_labels(layout, reason, "ERROR", context)
+        settings = layout.column(align=True)
+        settings.enabled = not active
+        settings.prop(scene, "biomechanics_chain_base")
+        settings.prop(scene, "biomechanics_chain_top")
+        settings.prop(scene, "biomechanics_chain_move_ribs")
+        settings.prop(scene, "biomechanics_chain_pin_top")
+        settings.prop(scene, "biomechanics_chain_rest_from_original")
+        gravity_row = layout.row(align=True)
+        gravity_row.prop(scene, "biomechanics_chain_gravity", text="Gravity", toggle=True, icon="FORCE_FORCE")
+        gravity_value = gravity_row.row()
+        gravity_value.enabled = scene.biomechanics_chain_gravity
+        gravity_value.prop(scene, "biomechanics_chain_gravity_mm", text="")
+        missing = fields_missing(scene)
+        row = layout.row()
+        row.enabled = not active
+        row.operator(
+            BIOMECHANICS_OT_precompute_chain_fields.bl_idname,
+            text=f"Precompute Collision Fields ({len(missing)} missing)" if missing else "Collision Fields Cached",
+            icon="MESH_GRID",
+        )
+        if not active:
+            if ready:
+                layout.operator(BIOMECHANICS_OT_start_chain.bl_idname, text="Start with Target Arrows", icon="PLAY")
+        else:
+            if not free:
+                layout.operator(BIOMECHANICS_OT_select_chain_target.bl_idname, icon="EMPTY_ARROWS")
+                _wrapped_labels(
+                    layout,
+                    f"Move the target arrows or {chain_session().handle_name} itself with G / R.",
+                    "INFO",
+                    context,
+                )
+            row = layout.row(align=True)
+            row.operator(BIOMECHANICS_OT_stop_chain.bl_idname, text="Stop, Keep Pose", icon="PAUSE").restore = False
+            row.operator(BIOMECHANICS_OT_stop_chain.bl_idname, text="Stop, Reset", icon="LOOP_BACK").restore = True
+            status = chain_session().status(scene)
+            column = layout.column(align=True)
+            column.label(text=f"{status['bodies'] - 1} bones, {status['constraints']} constraints", icon="DOT")
+            column.label(text=f"Penetration {status['penetration_mm']:.2f} mm", icon="DOT")
+            column.label(text=f"Max ligament strain {status['strain_percent']:.1f}%", icon="DOT")
+            column.label(text=f"Solve {status['solve_ms']:.0f} ms", icon="DOT")
+        tuning = layout.column(align=True)
+        tuning.prop(scene, "biomechanics_chain_iterations")
+        tuning.prop(scene, "biomechanics_chain_substeps")
+        tuning.prop(scene, "biomechanics_chain_handle_compliance")
+        tuning.prop(scene, "biomechanics_chain_margin_mm")
 
 
 class BIOMECHANICS_PT_neural_dataset_panel(bpy.types.Panel):

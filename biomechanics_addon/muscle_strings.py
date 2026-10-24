@@ -22,6 +22,7 @@ from bpy_extras import view3d_utils  # pyright: ignore[reportMissingImports]
 from bpy_extras.io_utils import ExportHelper  # pyright: ignore[reportMissingImports]
 from gpu_extras.batch import batch_for_shader  # pyright: ignore[reportMissingImports]
 from mathutils import Matrix, Vector  # pyright: ignore[reportMissingImports]
+from mathutils.kdtree import KDTree  # pyright: ignore[reportMissingImports]
 
 from .alignment import base_object_name, world_vertices
 from .correspondence import (
@@ -33,6 +34,7 @@ from .correspondence import (
     _uniform_shader,
     _view_region_under_mouse,
 )
+from .ligament_atlas import ligament_strings
 from .muscle_atlas import GROUPS, MIDLINE, landmark_spec, muscle_strings, string_key
 
 
@@ -41,6 +43,12 @@ HOVER_PIXELS = 8.0
 HOVER_COLOR = (1.0, 1.0, 1.0, 1.0)
 HOVER_LINE_WIDTH = 4.0
 BUILT_FROM_PROPERTY = "biomechanics_muscle_bones"
+STRING_KIND_PROPERTY = "biomechanics_string_kind"
+# kind -> (collection suffix, atlas function)
+STRING_SETS = {
+    "muscle": ("muscles", muscle_strings),
+    "ligament": ("ligaments", ligament_strings),
+}
 STRING_PROPERTY = "biomechanics_muscle_string"
 
 DELTA_BINS = 21
@@ -99,6 +107,8 @@ class _LandmarkResolver:
         self.anterior, self.left, self.superior = _body_frame(meshes, collection)
         self._vertices = {}
         self._indices = {}
+        self._trees = {}
+        self._world = {}
 
     def _bone_coordinates(self, bone):
         if bone not in self._vertices:
@@ -106,45 +116,119 @@ class _LandmarkResolver:
             self._vertices[bone] = (vertices @ self.anterior, vertices @ self.left, vertices @ self.superior)
         return self._vertices[bone]
 
+    def _world_vertices(self, bone):
+        if bone not in self._world:
+            self._world[bone] = world_vertices(_single(self.meshes, bone, self.collection))
+        return self._world[bone]
+
+    def _tree(self, bone):
+        """KD-tree of a bone's world vertices (subsampled) for nearest-bone landmarks."""
+        if bone not in self._trees:
+            vertices = self._world_vertices(bone)
+            if len(vertices) > 30000:
+                vertices = vertices[np.random.default_rng(0).choice(len(vertices), 30000, replace=False)]
+            tree = KDTree(len(vertices))
+            for index, vertex in enumerate(vertices):
+                tree.insert(vertex, index)
+            tree.balance()
+            self._trees[bone] = tree
+        return self._trees[bone]
+
+    def _near_mask(self, bone, mask, near_bone, tolerance_mm):
+        """Restrict mask to vertices within tolerance of the closest approach to near_bone."""
+        tree = self._tree(near_bone)
+        vertices = self._world_vertices(bone)
+        candidates = np.flatnonzero(mask)
+        distances = np.array([tree.find(vertices[index])[2] for index in candidates])
+        limit = distances.min() + tolerance_mm / _millimeters_per_unit(bpy.context.scene)
+        near = np.zeros(len(mask), dtype=bool)
+        near[candidates[distances <= limit]] = True
+        return near
+
     def vertex_index(self, bone, landmark, side):
-        key = (bone, landmark, side)
+        key = (bone, landmark if isinstance(landmark, str) else json.dumps(landmark, sort_keys=True), side)
         if key in self._indices:
             return self._indices[key]
 
-        (weight_a, weight_l, weight_s), bands = landmark_spec(bone, landmark)
+        if isinstance(landmark, dict):
+            (weight_a, weight_l, weight_s), bands = landmark["direction"], landmark.get("bands", {})
+            mode = landmark.get("mode", "extreme")
+            near_bone, tolerance = landmark.get("near"), landmark.get("tolerance_mm", 3.0)
+            nearest_to = landmark.get("nearest_to")
+            if nearest_to is not None:
+                other_bone, other_landmark = nearest_to[0], nearest_to[1]
+                other_side = nearest_to[2] if len(nearest_to) > 2 else side
+                other_index = self.vertex_index(other_bone, other_landmark, other_side)
+                anchor = self._world_vertices(other_bone)[other_index]
+                mode = "anchor"
+        else:
+            spec = landmark_spec(bone, landmark)
+            (weight_a, weight_l, weight_s), bands = spec[0], spec[1]
+            mode = spec[2] if len(spec) > 2 else "extreme"
+            near_bone, tolerance = None, 0.0
         anterior, left, superior = self._bone_coordinates(bone)
         lateral_sign = 0.0 if side == MIDLINE else (1.0 if side == "L" else -1.0)
         lateral = left * lateral_sign
-        axes = {"A": anterior, "S": superior, "L": lateral}
+        midline_distance = np.abs(left - np.median(left))
+        axes = {"A": anterior, "S": superior, "L": lateral, "M": midline_distance}
 
+        # Bands apply in order, each normalized over the vertices the earlier bands kept,
+        # so {"A": body, "S": top} means the top of the body, not of the whole bone.
         mask = np.ones(len(anterior), dtype=bool)
         for axis, (low, high) in bands.items():
             values = axes[axis]
-            span = values.max() - values.min()
-            normalized = (values - values.min()) / span if span > 0.0 else np.zeros_like(values)
+            kept = values[mask]
+            if kept.size == 0:
+                break
+            span = kept.max() - kept.min()
+            normalized = (values - kept.min()) / span if span > 0.0 else np.zeros_like(values)
             mask &= (normalized >= low) & (normalized <= high)
         if not mask.any():
             raise ValueError(f"Landmark {landmark} band is empty on {bone}")
+        if near_bone is not None:
+            mask = self._near_mask(bone, mask, near_bone, tolerance)
 
-        score = weight_a * anterior + weight_l * lateral + weight_s * superior
-        score = np.where(mask, score, -np.inf)
-        index = int(np.argmax(score))
+        if mode == "anchor":
+            offsets = np.linalg.norm(self._world_vertices(bone) - anchor, axis=1)
+            index = int(np.argmin(np.where(mask, offsets, np.inf)))
+        elif mode == "centroid":
+            coordinates = np.stack((anterior, left, superior), axis=1)
+            center = coordinates[mask].mean(axis=0)
+            offsets = np.linalg.norm(coordinates - center, axis=1)
+            index = int(np.argmin(np.where(mask, offsets, np.inf)))
+        else:
+            score = weight_a * anterior + weight_l * lateral + weight_s * superior
+            score = np.where(mask, score, -np.inf)
+            index = int(np.argmax(score))
         self._indices[key] = index
         return index
 
 
-def _muscle_collection_name(bone_collection):
-    return f"{bone_collection.name} muscles"
+def _string_collection_name(bone_collection, kind):
+    return f"{bone_collection.name} {STRING_SETS[kind][0]}"
 
 
-def muscle_collections(scene):
-    """Return {bone collection name: muscle collection} for built string sets."""
+def muscle_collections(scene, kind="muscle"):
+    """Return {bone collection name: string collection} for built sets of one kind."""
     found = {}
     for collection in bpy.data.collections:
         bones = collection.get(BUILT_FROM_PROPERTY)
-        if bones:
+        if bones and collection.get(STRING_KIND_PROPERTY, "muscle") == kind:
             found[bones] = collection
     return found
+
+
+def string_collections(scene):
+    """Return [(bone collection name, kind, collection)] for every built string set."""
+    return [
+        (bones, kind, collection)
+        for kind in STRING_SETS
+        for bones, collection in muscle_collections(scene, kind).items()
+    ]
+
+
+def collection_kind(collection):
+    return collection.get(STRING_KIND_PROPERTY, "muscle")
 
 
 def _remove_muscle_collection(collection):
@@ -195,23 +279,26 @@ def _create_string(collection, bone_collection, string, attachments, scene):
         hook.vertex_indices_set([point_index])
         hook.matrix_inverse = bone.matrix_world.inverted()
 
-    obj[STRING_PROPERTY] = json.dumps(
-        {
-            "muscle": string["muscle"],
-            "label": string["label"],
-            "group": string["group"],
-            "side": string["side"],
-            "index": string["index"],
-            "count": string["count"],
-            "name": string["name"],
-            "attachments": [[bone.name, index] for bone, index in attachments],
-        }
-    )
+    info = {
+        "muscle": string["muscle"],
+        "label": string["label"],
+        "group": string["group"],
+        "side": string["side"],
+        "index": string["index"],
+        "count": string["count"],
+        "name": string["name"],
+        "kind": string.get("kind", "muscle"),
+        "attachments": [[bone.name, index] for bone, index in attachments],
+    }
+    for key in ("compliance", "unilateral", "slack"):
+        if key in string:
+            info[key] = string[key]
+    obj[STRING_PROPERTY] = json.dumps(info)
     return obj
 
 
-def build_muscle_strings(scene):
-    """Rebuild strings on Original and Rigid. Returns (counts per collection, skipped messages)."""
+def build_muscle_strings(scene, kind="muscle"):
+    """Rebuild one kind of strings on Original and Rigid. Returns (counts per collection, skipped)."""
     source = scene.biomechanics_source_collection
     target = scene.biomechanics_target_collection
     if source is None or target is None:
@@ -222,27 +309,31 @@ def build_muscle_strings(scene):
     clear_caches()
     source_meshes = _mesh_by_base_name(source)
     resolver = _LandmarkResolver(source_meshes, source)
-    strings = muscle_strings()
+    strings = STRING_SETS[kind][1]()
 
     resolved = []
     skipped = []
     for string in strings:
         try:
-            refs = [(bone, resolver.vertex_index(bone, landmark, string["side"])) for bone, landmark in string["points"]]
+            refs = [
+                (point[0], resolver.vertex_index(point[0], point[1], point[2] if len(point) > 2 else string["side"]))
+                for point in string["points"]
+            ]
         except (KeyError, ValueError) as error:
             skipped.append(f"{string['label']} {string['side']} {string['name']}: {error}")
             continue
         resolved.append((string, refs))
 
-    existing = muscle_collections(scene)
+    existing = muscle_collections(scene, kind)
     counts = {}
     for bone_collection in (source, target):
         meshes = source_meshes if bone_collection == source else _mesh_by_base_name(bone_collection)
         old = existing.get(bone_collection.name)
         if old is not None:
             _remove_muscle_collection(old)
-        collection = bpy.data.collections.new(_muscle_collection_name(bone_collection))
+        collection = bpy.data.collections.new(_string_collection_name(bone_collection, kind))
         collection[BUILT_FROM_PROPERTY] = bone_collection.name
+        collection[STRING_KIND_PROPERTY] = kind
         scene.collection.children.link(collection)
 
         count = 0
@@ -337,13 +428,26 @@ def _strings_by_key(collection):
     return strings
 
 
-def length_rows(scene):
-    """Return comparison rows for every built string, Original first."""
-    collections = muscle_collections(scene)
+def _twin_sets(scene, kind):
+    """(Original strings by key, Rigid strings by key) for one kind."""
+    collections = muscle_collections(scene, kind)
     source = scene.biomechanics_source_collection
     target = scene.biomechanics_target_collection
     source_strings = _strings_by_key(collections[source.name]) if source and source.name in collections else {}
     target_strings = _strings_by_key(collections[target.name]) if target and target.name in collections else {}
+    return source_strings, target_strings
+
+
+def length_rows(scene):
+    """Return comparison rows for every built string of every kind, Original first."""
+    rows = []
+    for kind in STRING_SETS:
+        rows += _length_rows_of_kind(scene, kind)
+    return rows
+
+
+def _length_rows_of_kind(scene, kind):
+    source_strings, target_strings = _twin_sets(scene, kind)
     rows = []
     for key in sorted(set(source_strings) | set(target_strings)):
         source_entry = source_strings.get(key)
@@ -353,6 +457,7 @@ def length_rows(scene):
         target_length = string_length_mm(target_entry[1], scene) if target_entry else None
         rows.append(
             {
+                "kind": kind,
                 "muscle": info["label"],
                 "side": info["side"],
                 "string": info["index"] + 1,
@@ -366,8 +471,8 @@ def length_rows(scene):
 
 
 def _twin(obj, info, scene):
-    """Return the matching string object in the other muscle collection."""
-    collections = muscle_collections(scene)
+    """Return the matching string object in the other collection of the same kind."""
+    collections = muscle_collections(scene, info.get("kind", "muscle"))
     source = scene.biomechanics_source_collection
     target = scene.biomechanics_target_collection
     if source is None or target is None:
@@ -452,17 +557,22 @@ def _restore_string_color(obj):
 
 
 def apply_delta_colors(scene):
-    """Color each Original/Rigid twin pair by its length change."""
-    collections = muscle_collections(scene)
-    source = scene.biomechanics_source_collection
-    target = scene.biomechanics_target_collection
-    source_strings = _strings_by_key(collections[source.name]) if source and source.name in collections else {}
-    target_strings = _strings_by_key(collections[target.name]) if target and target.name in collections else {}
+    """Color each Original/Rigid twin pair of every kind by its length change."""
     unit = scene.biomechanics_muscle_delta_unit
     limit = scene.biomechanics_muscle_delta_range
     materials = delta_bin_materials()
     unpaired = unpaired_material()
 
+    for kind in STRING_SETS:
+        _apply_delta_colors_of_kind(scene, kind, unit, limit, materials, unpaired)
+
+    from .muscle_sheets import apply_sheet_colors
+
+    apply_sheet_colors(scene)
+
+
+def _apply_delta_colors_of_kind(scene, kind, unit, limit, materials, unpaired):
+    source_strings, target_strings = _twin_sets(scene, kind)
     for key in set(source_strings) | set(target_strings):
         source_entry = source_strings.get(key)
         target_entry = target_strings.get(key)
@@ -475,10 +585,6 @@ def apply_delta_colors(scene):
         for entry in (source_entry, target_entry):
             if entry is not None:
                 _set_string_color(entry[0], material)
-
-    from .muscle_sheets import apply_sheet_colors
-
-    apply_sheet_colors(scene)
 
 
 def restore_delta_colors():
@@ -607,7 +713,7 @@ def _string_under_mouse(context, region, region_data, mouse):
     view_layer = context.view_layer
     best = None
     best_distance = HOVER_PIXELS * context.preferences.system.ui_scale
-    for collection in muscle_collections(context.scene).values():
+    for _bones, _kind, collection in string_collections(context.scene):
         if not _collection_shown(view_layer, collection):
             continue
         for obj in collection.objects:
@@ -835,22 +941,31 @@ def is_hover_active():
 
 
 class BIOMECHANICS_OT_build_muscle_strings(bpy.types.Operator):
-    """Attach one string per muscle attachment between bones of Original, and the same on Rigid"""
+    """Attach one string per attachment between bones of Original, and the same on Rigid"""
 
     bl_idname = "biomechanics.build_muscle_strings"
     bl_label = "Build Muscle Strings"
     bl_options = {"REGISTER", "UNDO"}
+
+    kind: bpy.props.EnumProperty(
+        name="Kind",
+        items=(
+            ("muscle", "Muscles", "One string per muscle attachment"),
+            ("ligament", "Ligaments & Discs", "Ligaments and intervertebral disc springs"),
+        ),
+        default="muscle",
+    )
 
     def execute(self, context):
         from .muscle_sheets import build_sheets, sheets_exist
 
         had_sheets = sheets_exist(context.scene)
         try:
-            counts, skipped = build_muscle_strings(context.scene)
+            counts, skipped = build_muscle_strings(context.scene, self.kind)
         except ValueError as error:
             self.report({"ERROR"}, str(error))
             return {"CANCELLED"}
-        if had_sheets:
+        if had_sheets and self.kind == "muscle":
             build_sheets(context.scene)
         if _delta_active:
             _apply_delta_colors_now(context.scene)
@@ -870,12 +985,12 @@ class BIOMECHANICS_OT_remove_muscle_strings(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return bool(muscle_collections(context.scene))
+        return bool(string_collections(context.scene))
 
     def execute(self, context):
         global _hover_sample
         disable_delta_colors()
-        for collection in muscle_collections(context.scene).values():
+        for _bones, _kind, collection in string_collections(context.scene):
             _remove_muscle_collection(collection)
         _hover_sample = None
         _tag_view_redraw()
@@ -932,7 +1047,7 @@ class BIOMECHANICS_OT_toggle_muscle_delta_colors(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return _delta_active or bool(muscle_collections(context.scene))
+        return _delta_active or bool(string_collections(context.scene))
 
     def execute(self, context):
         if _delta_active:
@@ -953,7 +1068,7 @@ class BIOMECHANICS_OT_export_muscle_lengths(bpy.types.Operator, ExportHelper):
 
     @classmethod
     def poll(cls, context):
-        return bool(muscle_collections(context.scene))
+        return bool(string_collections(context.scene))
 
     def execute(self, context):
         scene = context.scene
@@ -963,7 +1078,7 @@ class BIOMECHANICS_OT_export_muscle_lengths(bpy.types.Operator, ExportHelper):
         with open(self.filepath, "w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
             writer.writerow(
-                ["muscle", "side", "string", "attachment", "bones", f"{source_name}_mm", f"{target_name}_mm", "delta_mm", "delta_percent"]
+                ["kind", "muscle", "side", "string", "attachment", "bones", f"{source_name}_mm", f"{target_name}_mm", "delta_mm", "delta_percent"]
             )
             for row in rows:
                 source_length, target_length = row["source_mm"], row["target_mm"]
@@ -971,6 +1086,7 @@ class BIOMECHANICS_OT_export_muscle_lengths(bpy.types.Operator, ExportHelper):
                 percent = 100.0 * delta / source_length if delta is not None and source_length else None
                 writer.writerow(
                     [
+                        row["kind"],
                         row["muscle"],
                         row["side"],
                         row["string"],

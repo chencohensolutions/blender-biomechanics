@@ -78,6 +78,9 @@ files when diagnosing a run.
 - `biomechanics_addon/muscle_atlas.py`: muscle attachment data; see [MUSCLE_ATTACHMENTS.md](MUSCLE_ATTACHMENTS.md).
 - `biomechanics_addon/muscle_strings.py`: muscle strings between bones, hover lengths, and CSV export.
 - `biomechanics_addon/muscle_sheets.py`: triangle sheets between a muscle's strings, colored by area change.
+- `biomechanics_addon/ligament_atlas.py`: ligaments and intervertebral discs as strings with stiffness data.
+- `biomechanics_addon/distance_field.py`, `bone_fields.py`: cached signed distance fields per bone for collision.
+- `biomechanics_addon/chain_solver.py`, `chain_interaction.py`: drag a vertebra and the chain follows through ligaments, discs, and bone contact.
 - `biomechanics_addon/neural_geometry.py`: evaluated mesh geometry and pose labeling helpers.
 - `biomechanics_addon/neural_training.py`: bpy-free launch, status, and artifact helpers.
 - `biomechanics_addon/operators.py`: user actions and input validation.

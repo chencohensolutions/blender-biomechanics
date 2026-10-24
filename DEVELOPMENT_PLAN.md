@@ -221,7 +221,87 @@ the list of muscles left out: [MUSCLE_ATTACHMENTS.md](MUSCLE_ATTACHMENTS.md).
   bone bands). Absolute lengths are approximate; Original/Rigid deltas use identical
   points. Strings do not wrap bone surfaces except at explicit via points.
 
-## Core Functions
+### Ligaments & Discs
+
+Module `biomechanics_addon/ligament_atlas.py` (bpy-free); built by
+**Build Ligaments & Discs** (`biomechanics.build_muscle_strings` with `kind="ligament"`)
+into `<collection> ligaments`, tagged `biomechanics_string_kind = "ligament"`. The
+muscle hover, length-change colors, and CSV export cover both kinds; sheets are
+muscle-only. Each string stores `compliance`, `unilateral`, and `slack` for the
+chain solver. Discs are a central nucleus spring (stiff) plus a 6-point annulus
+ring between the facing endplates; ligaments resist tension only.
+
+Landmark resolution (`muscle_strings._LandmarkResolver`) gained: sequential bands
+(each normalized over the vertices the earlier bands kept), axis `M` (distance from
+the midline), mode `centroid`, inline dict specs with `near` (vertices within
+`tolerance_mm` of the closest approach to a named bone: endplates, facets, auricular
+surfaces, costal facets, acetabulum) and `nearest_to` (closest vertex to another
+bone's landmark). Per-point side overrides allow cross-midline strings (pubic
+symphysis).
+
+### Bone Chain
+
+Panel: **Bone Chain**. Modules: `distance_field.py` (bpy-free grid, trilinear
+sampling, flood-fill sign), `bone_fields.py` (BVH-based field computation, disk
+cache `<Field Cache>/<fingerprint>_<voxel>mm.npz`, surface samples),
+`chain_solver.py` (bpy-free XPBD), `chain_interaction.py` (session, target Empty,
+handlers, operators).
+
+- **Precompute Collision Fields** computes 1 mm signed distance fields (auto-coarsened
+  above 2.5 M cells) in each bone's local frame; the exterior is flood-filled through
+  cells more than 1.75 voxels from the surface and grown back, so segmentation holes
+  stay closed. Verified on L5: 99.8 % sign agreement with ray parity, max distance
+  error 0.46 mm, 2 k-point query with gradient in ~2 ms. Blender blocks during
+  computation (about 3 s per vertebra, 20 s for the sacrum/ilia).
+- **Start Chain Interaction** needs a Rigid vertebra active. Free bodies are the
+  vertebrae above **Base Bone** up to **Top Bone**; the base is fixed. Constraints are
+  every ligament/disc string whose bones are all in the chain, with rest lengths from
+  the pose at start (**Rest Lengths from Original** switches to Original lengths,
+  which makes the Rigid pose drift toward the Original equilibrium). Adjacent bones
+  form collision pairs with 1,200 surface samples each; a pair's margin is capped
+  at its rest clearance so touching bones are not pushed apart at start. Ribs follow
+  their vertebra rigidly when **Ribs Follow** is on.
+- **Move Bones** (`biomechanics.toggle_move_bones`) is the primary control: a free
+  session with no handle. The depsgraph handler compares every chain bone in the
+  update set with the matrix the solver last wrote (`ChainSession.written`); a bone
+  that differs was moved by the user, becomes the handle (`set_handle`, which frees
+  a pinned top bone while it is held and rebuilds the solver arrays), its matrix
+  becomes the pose target, and the solve plus settle run. Toggling off keeps the
+  pose. Blender's own undo steps (from the transform operators) restore earlier poses.
+- **Start with Target Arrows** is the older explicit mode with a target Empty.
+- The target Empty is 12 cm arrows drawn in front; **Select Target** reselects it.
+  Grabbing the handle vertebra itself also works: when its matrix differs from the
+  one the solver last wrote, the target is moved onto it and the solve runs.
+- The handle is pulled toward `Biomechanics Chain Target` by a pose constraint
+  (**Handle Compliance**, 1 mm / 0.02 rad per sweep step limit, which prevents
+  tunneling). A depsgraph handler solves when the target moves, and a 30 ms timer
+  keeps solving while bodies still move more than 0.01 mm (at most 60 solves), so a
+  held target settles to equilibrium. **Stop, Keep Pose** / **Stop, Reset**.
+- Solver: batched XPBD. Distance constraints are grouped by bone pair and the
+  groups are projected in sequence along the chain (direction alternating each
+  sweep); contacts are projected per pair the same way. Averaging a body's
+  corrections over all of its constraints instead was tried and lets a steady load
+  (gravity) win every round. `substeps` rounds of `iterations` sweeps; collision
+  samples screened once per substep within band + maximum pose travel + gravity;
+  up to 4 deepest contacts per pair direction. Measured: 17 free bones, 289
+  constraints, 17 pairs, 5 x 2 sweeps: about 70-90 ms per solve, penetration
+  0.2-0.5 mm, zero drift at rest without gravity.
+- **Gravity** (toggle + mm/step, default 0.1): every free body is displaced by that
+  amount along world -Z at the start of each substep (the XPBD position prediction
+  under constant acceleration); ligaments, discs, and contacts carry it. Starting a
+  session kicks off settling immediately, and changing gravity restarts it.
+  **Pin Top Bone** (default on) fixes the top bone so the chain hangs between base
+  and top; unpinned, the thoracic column has nothing above it and droops like a
+  cantilever (118 mm at T01 with 0.3 mm/step), which is what a passive spine without
+  muscle tone does. With the defaults the mid-thoracic spine sags about 4 mm
+  (ligament slack plus disc give) and settles in about 50 solves (under 5 s); lumbar
+  bones move under 1 mm, and dragging L3 20 mm forward still moves it 15 mm.
+- The solver is deterministic and bpy-free, intended as the ground truth for a later
+  learned surrogate (option 4): record (target pose, start pose, gravity) -> solved pose.
+- Settle loop: `SETTLE_THRESHOLD` 0.03 mm of maximum body movement per solve, at most
+  `MAX_SETTLE_SOLVES` (150) per kick, 30 ms apart. Each solve blocks the UI for its
+  duration, so settling is visibly choppy; the neural surrogate is the planned fix.
+
 
 ### `alignment.base_object_name(name)`
 
@@ -293,6 +373,15 @@ order and unregister them in reverse order, preserving Blender add-on convention
    length-change colors, hover overlay, and CSV export.
 - `biomechanics_addon/muscle_sheets.py`: triangle sheets between neighboring strings
    and their per-face area-change colors.
+- `biomechanics_addon/ligament_atlas.py`: bpy-free ligament and disc atlas with
+   mechanical parameters and contact-surface landmark specs.
+- `biomechanics_addon/distance_field.py`: bpy-free signed distance grid, sign
+   recovery, and trilinear queries.
+- `biomechanics_addon/bone_fields.py`: Blender-side field computation, disk cache, and
+   collision surface samples.
+- `biomechanics_addon/chain_solver.py`: bpy-free batched XPBD rigid chain solver.
+- `biomechanics_addon/chain_interaction.py`: chain session, target Empty, handlers,
+   and operators.
 - `biomechanics_addon/distance_heatmap.py`: temporary per-vertex distance heatmap and
    viewport legend.
 - `biomechanics_addon/dataset_io.py`: bpy-free chunked NPZ dataset serialization.

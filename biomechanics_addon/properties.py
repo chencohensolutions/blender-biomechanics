@@ -148,6 +148,12 @@ def _update_muscle_delta_scale(scene, context):
     update_delta_scale(scene, context)
 
 
+def _update_chain_gravity(scene, context):
+    from .chain_interaction import update_gravity
+
+    update_gravity(scene, context)
+
+
 def register_properties():
     bpy.types.Scene.biomechanics_heatmap_scale = bpy.props.EnumProperty(
         name="Heatmap Scale",
@@ -176,6 +182,87 @@ def register_properties():
         min=0.1,
         soft_max=50.0,
         update=_update_muscle_delta_scale,
+    )
+    bpy.types.Scene.biomechanics_field_cache_dir = bpy.props.StringProperty(
+        name="Field Cache",
+        description="Folder for cached bone signed distance fields (// is the .blend folder)",
+        default="//biomechanics_cache",
+        subtype="DIR_PATH",
+    )
+    bpy.types.Scene.biomechanics_chain_base = bpy.props.StringProperty(
+        name="Base Bone",
+        description="Fixed bone the chain stands on (sacrum or a vertebra name such as L3)",
+        default="sacrum",
+    )
+    bpy.types.Scene.biomechanics_chain_top = bpy.props.StringProperty(
+        name="Top Bone",
+        description="Highest free vertebra of the chain",
+        default="T01",
+    )
+    bpy.types.Scene.biomechanics_chain_iterations = bpy.props.IntProperty(
+        name="Iterations",
+        description="Constraint sweeps per substep",
+        default=5,
+        min=1,
+        max=50,
+    )
+    bpy.types.Scene.biomechanics_chain_substeps = bpy.props.IntProperty(
+        name="Substeps",
+        description="Solver rounds per update; more rounds reach equilibrium sooner",
+        default=2,
+        min=1,
+        max=20,
+    )
+    bpy.types.Scene.biomechanics_chain_handle_compliance = bpy.props.FloatProperty(
+        name="Handle Compliance",
+        description="How softly the dragged bone follows its target; higher lets ligaments and contacts hold it back more",
+        default=0.02,
+        min=0.0,
+        soft_max=5.0,
+        precision=3,
+    )
+    bpy.types.Scene.biomechanics_chain_margin_mm = bpy.props.FloatProperty(
+        name="Contact Margin (mm)",
+        description="Minimum clearance kept between chain bones",
+        default=0.3,
+        min=0.0,
+        soft_max=3.0,
+        precision=2,
+    )
+    bpy.types.Scene.biomechanics_chain_rest_from_original = bpy.props.BoolProperty(
+        name="Rest Lengths from Original",
+        description="Use Original ligament lengths as rest lengths; off uses the pose at start, which then holds still",
+        default=False,
+    )
+    bpy.types.Scene.biomechanics_chain_gravity = bpy.props.BoolProperty(
+        name="Gravity",
+        description="Pull free chain bones down (world -Z); ligaments, discs, and contacts carry the weight",
+        default=True,
+        update=_update_chain_gravity,
+    )
+    bpy.types.Scene.biomechanics_chain_gravity_mm = bpy.props.FloatProperty(
+        name="Gravity (mm/step)",
+        description="How far an unsupported bone drops per solver round; larger means heavier bones relative to ligament stiffness",
+        default=0.1,
+        min=0.0,
+        soft_max=3.0,
+        precision=2,
+        update=_update_chain_gravity,
+    )
+    bpy.types.Scene.biomechanics_chain_pin_top = bpy.props.BoolProperty(
+        name="Pin Top Bone",
+        description="Keep the top bone fixed so the chain hangs between base and top instead of drooping",
+        default=True,
+    )
+    bpy.types.Scene.biomechanics_chain_move_ribs = bpy.props.BoolProperty(
+        name="Ribs Follow",
+        description="Ribs move rigidly with their vertebra",
+        default=True,
+    )
+    bpy.types.Scene.biomechanics_chain_target_object = bpy.props.PointerProperty(
+        name="Chain Target",
+        type=bpy.types.Object,
+        options={"HIDDEN"},
     )
     bpy.types.Scene.biomechanics_muscle_sheet_range = bpy.props.FloatProperty(
         name="Sheet Range %",
@@ -448,3 +535,23 @@ def unregister_properties():
     del bpy.types.Scene.biomechanics_training_moving_object
     del bpy.types.Scene.biomechanics_training_fixed_object
     del bpy.types.Scene.biomechanics_heatmap_scale
+    for name in (
+        "biomechanics_muscle_delta_unit",
+        "biomechanics_muscle_delta_range",
+        "biomechanics_muscle_sheet_range",
+        "biomechanics_field_cache_dir",
+        "biomechanics_chain_base",
+        "biomechanics_chain_top",
+        "biomechanics_chain_iterations",
+        "biomechanics_chain_substeps",
+        "biomechanics_chain_handle_compliance",
+        "biomechanics_chain_margin_mm",
+        "biomechanics_chain_move_ribs",
+        "biomechanics_chain_gravity",
+        "biomechanics_chain_gravity_mm",
+        "biomechanics_chain_pin_top",
+        "biomechanics_chain_rest_from_original",
+        "biomechanics_chain_target_object",
+    ):
+        if hasattr(bpy.types.Scene, name):
+            delattr(bpy.types.Scene, name)
