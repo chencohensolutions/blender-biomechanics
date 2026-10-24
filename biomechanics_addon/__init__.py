@@ -19,10 +19,12 @@ from .correspondence import (
 )
 from .distance_heatmap import BIOMECHANICS_OT_toggle_distance_heatmap, register_heatmap, unregister_heatmap
 from .interaction import register_interaction, unregister_interaction
+from .muscle_sheets import BIOMECHANICS_OT_toggle_muscle_sheets
 from .muscle_strings import (
     BIOMECHANICS_OT_build_muscle_strings,
     BIOMECHANICS_OT_export_muscle_lengths,
     BIOMECHANICS_OT_remove_muscle_strings,
+    BIOMECHANICS_OT_toggle_muscle_delta_colors,
     BIOMECHANICS_OT_toggle_muscle_hover,
     register_muscle_strings,
     unregister_muscle_strings,
@@ -81,6 +83,8 @@ CLASSES = (
     BIOMECHANICS_OT_build_muscle_strings,
     BIOMECHANICS_OT_remove_muscle_strings,
     BIOMECHANICS_OT_toggle_muscle_hover,
+    BIOMECHANICS_OT_toggle_muscle_delta_colors,
+    BIOMECHANICS_OT_toggle_muscle_sheets,
     BIOMECHANICS_OT_export_muscle_lengths,
     BIOMECHANICS_PT_main_panel,
     BIOMECHANICS_PT_setup_panel,

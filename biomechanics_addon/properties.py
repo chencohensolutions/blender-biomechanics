@@ -142,6 +142,12 @@ def _update_heatmap_scale(scene, context):
     update_heatmap_scale(scene, context)
 
 
+def _update_muscle_delta_scale(scene, context):
+    from .muscle_strings import update_delta_scale
+
+    update_delta_scale(scene, context)
+
+
 def register_properties():
     bpy.types.Scene.biomechanics_heatmap_scale = bpy.props.EnumProperty(
         name="Heatmap Scale",
@@ -152,6 +158,32 @@ def register_properties():
         ),
         default="GLOBAL",
         update=_update_heatmap_scale,
+    )
+    bpy.types.Scene.biomechanics_muscle_delta_unit = bpy.props.EnumProperty(
+        name="Length Change Unit",
+        description="How muscle string length change is measured for coloring",
+        items=(
+            ("PERCENT", "Percent", "Change relative to the Original length (strain), comparable across muscles"),
+            ("MM", "mm", "Absolute change in millimeters"),
+        ),
+        default="PERCENT",
+        update=_update_muscle_delta_scale,
+    )
+    bpy.types.Scene.biomechanics_muscle_delta_range = bpy.props.FloatProperty(
+        name="Color Range",
+        description="Length change that maps to full blue (shorter) or full red (longer)",
+        default=10.0,
+        min=0.1,
+        soft_max=50.0,
+        update=_update_muscle_delta_scale,
+    )
+    bpy.types.Scene.biomechanics_muscle_sheet_range = bpy.props.FloatProperty(
+        name="Sheet Range %",
+        description="Triangle area change in percent that maps to full blue (smaller) or full red (larger)",
+        default=20.0,
+        min=0.1,
+        soft_max=100.0,
+        update=_update_muscle_delta_scale,
     )
     bpy.types.Scene.biomechanics_training_fixed_object = bpy.props.PointerProperty(
         name="Fixed Bone",

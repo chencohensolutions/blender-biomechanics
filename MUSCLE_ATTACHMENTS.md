@@ -21,6 +21,10 @@ both on those bones are modeled. Each string connects bones of the same collecti
   millimeters. Via points (psoas and iliacus over the iliopubic eminence) keep a
   string on the anatomical side of the pelvic brim. Strings do not wrap around bone
   surfaces otherwise; a straight segment can pass through bone.
+- Optional sheets fill triangles between consecutive strings of a muscle (in the
+  order listed below), so area change can be seen as well as fiber length change.
+  Fan-shaped muscles (one origin, several insertions) give skinny triangles whose
+  area is sensitive to the angle between neighboring strings.
 - Landmarks are geometric approximations of anatomical sites, not segmentations.
   Treat absolute lengths as approximate; Original-versus-Rigid differences use
   identical points and are the reliable measurement.

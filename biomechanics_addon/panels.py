@@ -10,11 +10,14 @@ from .correspondence import (
     max_distance_results,
 )
 from .distance_heatmap import BIOMECHANICS_OT_toggle_distance_heatmap, is_heatmap_active
+from .muscle_sheets import BIOMECHANICS_OT_toggle_muscle_sheets, sheets_exist
 from .muscle_strings import (
     BIOMECHANICS_OT_build_muscle_strings,
     BIOMECHANICS_OT_export_muscle_lengths,
     BIOMECHANICS_OT_remove_muscle_strings,
+    BIOMECHANICS_OT_toggle_muscle_delta_colors,
     BIOMECHANICS_OT_toggle_muscle_hover,
+    is_delta_active,
     is_hover_active as is_muscle_hover_active,
     muscle_collections,
 )
@@ -193,6 +196,27 @@ class BIOMECHANICS_PT_muscle_panel(bpy.types.Panel):
             icon="RESTRICT_SELECT_OFF" if hover_active else "RESTRICT_SELECT_ON",
             depress=hover_active,
         )
+        sheets_active = sheets_exist(context.scene)
+        layout.operator(
+            BIOMECHANICS_OT_toggle_muscle_sheets.bl_idname,
+            text="Muscle Sheets: On" if sheets_active else "Muscle Sheets: Off",
+            icon="MESH_GRID",
+            depress=sheets_active,
+        )
+        delta_active = is_delta_active()
+        layout.operator(
+            BIOMECHANICS_OT_toggle_muscle_delta_colors.bl_idname,
+            text="Length Change Colors: On" if delta_active else "Length Change Colors: Off",
+            icon="COLOR",
+            depress=delta_active,
+        )
+        scale_column = layout.column(align=True)
+        scale_column.enabled = delta_active
+        scale_column.row(align=True).prop(context.scene, "biomechanics_muscle_delta_unit", expand=True)
+        scale_column.prop(context.scene, "biomechanics_muscle_delta_range")
+        sheet_row = scale_column.row()
+        sheet_row.enabled = sheets_active
+        sheet_row.prop(context.scene, "biomechanics_muscle_sheet_range")
         layout.operator(BIOMECHANICS_OT_export_muscle_lengths.bl_idname, icon="EXPORT")
         for bones, collection in sorted(muscle_collections(context.scene).items()):
             layout.label(text=f"{bones}: {len(collection.objects)} strings", icon="DOT")

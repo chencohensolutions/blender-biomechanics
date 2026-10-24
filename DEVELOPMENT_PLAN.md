@@ -184,6 +184,36 @@ the list of muscles left out: [MUSCLE_ATTACHMENTS.md](MUSCLE_ATTACHMENTS.md).
   and shows its length and the matching Original/Rigid string's length and delta.
   Visibility is checked through object and layer-collection flags because
   `Object.visible_get()` returns False from a 3D-view context in Blender 5.x.
+- **Length Change Colors** (`biomechanics.toggle_muscle_delta_colors`) colors each
+  Original/Rigid twin pair by Rigid minus Original length on a diverging ramp: blue
+  shorter, gray unchanged, red longer, with a 21-bin set of shared
+  `Biomechanics Muscle Delta NN` materials. **Percent** (strain, default) or **mm**
+  is chosen by `Scene.biomechanics_muscle_delta_unit`; `Scene.biomechanics_muscle_delta_range`
+  (default 10) maps to full color. It sets each string's material slot to
+  `link = "OBJECT"` and `Object.color` (for Object color mode), so the curve data
+  keeps its group material; off, Remove, file load, and unregister restore
+  `link = "DATA"` and the group color. A 0.25 s timer recolors while active, but only
+  when a signature of every Original/Rigid mesh `matrix_world` changes, and it writes
+  only changed slots and material colors (any write tags a depsgraph update and
+  stalls viewport navigation). Bone objects, attachment vertex coordinates, and
+  parsed string/sheet JSON are cached because `bpy.data.objects.get` is slow with
+  ~1,500 objects; caches clear on build, file load, and reload. A legend is drawn above the
+  distance heatmap legend. Solid viewports in Attribute color mode (Distance
+  Heatmap on) do not show string colors.
+- **Muscle Sheets** (`biomechanics.toggle_muscle_sheets`, module `muscle_sheets.py`)
+  fills triangles between consecutive strings (atlas index order) of each muscle and
+  side, in both muscle collections; muscles with one string get no sheet. Vertices
+  are the shared attachment vertices, hooked per bone, so sheets stretch with the
+  strings. Each sheet stores its attachments and faces in `biomechanics_muscle_sheet`;
+  twin sheets have identical face lists, so face i pairs with face i. On is derived
+  from sheet objects existing; Build Muscle Strings rebuilds sheets if they existed.
+- With Length Change Colors on, each sheet face takes a material slot by its area
+  change in percent (slot 0 = group color, then the 21 delta bins, then unpaired)
+  scaled by `Scene.biomechanics_muscle_sheet_range` (default 20 %), and the sheet's
+  `Object.color` is its total area change, because Object color mode (used by the
+  transparent Comparison Display) cannot show per-face colors. A second legend shows
+  the sheet scale. Hover falls back to a scene ray cast and reports a sheet
+  triangle's areas; string and sheet hover always report Rigid minus Original.
 - **Export Muscle Lengths** (`biomechanics.export_muscle_lengths`) writes one CSV row
   per string with both lengths, delta in mm, and delta in percent.
 - Landmarks are approximations (extreme vertex along a direction within optional
@@ -259,7 +289,9 @@ order and unregister them in reverse order, preserving Blender add-on convention
    corresponding-vertex distance search.
 - `biomechanics_addon/muscle_atlas.py`: bpy-free muscle attachment and landmark data.
 - `biomechanics_addon/muscle_strings.py`: muscle string building, length measurement,
-   hover overlay, and CSV export.
+   length-change colors, hover overlay, and CSV export.
+- `biomechanics_addon/muscle_sheets.py`: triangle sheets between neighboring strings
+   and their per-face area-change colors.
 - `biomechanics_addon/distance_heatmap.py`: temporary per-vertex distance heatmap and
    viewport legend.
 - `biomechanics_addon/dataset_io.py`: bpy-free chunked NPZ dataset serialization.
