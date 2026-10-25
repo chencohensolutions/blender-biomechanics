@@ -426,6 +426,11 @@ class BIOMECHANICS_PT_chain_panel(bpy.types.Panel):
                     text=f"Policy generation {status['policy_generation']}, score {status['policy_score']:.2f}",
                     icon="DOT",
                 )
+            height = status["height_cm"]
+            column.label(
+                text=f"Top bone height {height:+.1f} cm" + ("  FAILED (below -5 cm)" if height <= -5.0 else ""),
+                icon="ERROR" if height <= -5.0 else "DOT",
+            )
             column.label(text=f"Penetration {status['penetration_mm']:.2f} mm", icon="DOT")
             column.label(text=f"Max ligament strain {status['strain_percent']:.1f}%", icon="DOT")
             column.label(text=f"Solve {status['solve_ms']:.0f} ms", icon="DOT")

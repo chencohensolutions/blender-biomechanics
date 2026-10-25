@@ -345,7 +345,10 @@ handlers, operators).
   body, offset from rest in cm and rotation vector). Score = top-bone height gain (cm)
   - 0.3 drift - 0.2 strain - penetration over 1 mm - effort. Writes
   `posture_policy.npz`; `posture_policy.py` (bpy-free) holds observation, network,
-  and save/load shared with Blender.
+  and save/load shared with Blender. An episode whose top bone drops by `--fail-cm`
+  (default 5 cm) or more ends at once as a failure scored -10 plus 2 x (fraction of
+  steps survived), always below any non-failing score. The Bone Chain panel shows the
+  top bone's height change and flags FAILED below -5 cm.
 - **Posture Controller** toggle (needs an active session) loads the policy file and
   sets activations from the live chain state before every solve; Muscle Tone is
   disabled while it is on. The panel shows mean activation, policy generation, and
@@ -367,8 +370,39 @@ handlers, operators).
   the policy must recover height. The displaced Rigid pose that the file was saved
   with was far less stable than the neutral pose; most of the collapse chased earlier
   came from that pose plus the solver issues above.
-- The solver is deterministic and bpy-free, intended as the ground truth for a later
-  learned surrogate (option 4): record (target pose, start pose, gravity) -> solved pose.
+- Learned dynamics surrogate (option 4, `tools/train_posture_surrogate.py`, PyTorch in
+  `.venv`): `collect` rolls the real solver under smooth random activations and random
+  pushes (`PostureEnv` from `train_posture.py`, 40 steps, gravity 0.3) and stores
+  `(observation, activations) -> next observation` transitions in
+  `dynamics_dataset.npz`; `fit` trains an MLP 217 -> 256 x 3 (SiLU) -> 126 that
+  predicts the normalized state delta (`dynamics_model.npz`, with the normalization
+  stats); `optimize` trains the posture policy (same 126 -> 32 -> 91 network and file
+  as the ES trainer) by Adam through 40 unrolled surrogate steps: mean top-bone height
+  capped at `--height-cap` 1 cm, minus 0.2 x activation^2, minus 10 x a soft fail
+  indicator below -5 cm; a quarter of each batch starts at rest, the rest from recorded
+  non-failed states. The result is scored in the real solver and written to
+  `posture_policy.npz` only if it beats the stored score (`--overwrite` to force).
+  `iterate` repeats collect (half the episodes under the latest surrogate policy plus
+  noise, appended to the dataset), warm-started fit, optimize, evaluate.
+- Surrogate findings: held-out per-step error 0.32 mm but 4-12 mm drift over 40
+  open-loop steps, and the policy exploits it. With random data only, the surrogate
+  predicted +9 cm (impossible) while the real solver scored -8 (failing); with the
+  height cap the surrogate predicted +0.7 cm, real -8.2; four on-policy rounds
+  (dataset 61,600 transitions, fit error flat at 0.42 normalized / 0.31 mm per step)
+  scored -6.6, -7.4, -8.3, -7.4 in the real solver: not improving. The ES policy
+  (-4.83, generation 6) remains the best real-solver result and is what
+  `posture_policy.npz` holds; `posture_policy_latest.npz` is the last surrogate policy.
+  Likely next levers: an ensemble of dynamics models with a disagreement penalty in
+  the objective (keeps the policy where the models agree), a longer input history or
+  the contact multipliers as hidden state, and training on multi-step rollouts.
+- `tools/surrogate_dashboard.py --package <dir>` serves `surrogate_dashboard.html` at
+  http://localhost:8765: the policy network with every weight as a line (blue positive,
+  red negative, opacity and width by magnitude, threshold slider), node fills from a
+  forward pass on the neutral or a pushed state, output activation bars, hover values,
+  and charts of the surrogate objective, the dynamics fit error, and the real-solver
+  score per round. The trainer writes `surrogate_live.json` atomically (every fit epoch,
+  every `--live-every` 10 optimize iterations); the page polls it once a second.
+  `.claude/launch.json` has a `surrogate-dashboard` entry for the desktop app preview.
 - Settle loop: `SETTLE_THRESHOLD` 0.03 mm of maximum body movement per solve, at most
   `MAX_SETTLE_SOLVES` (150) per kick, 30 ms apart. Each solve blocks the UI for its
   duration, so settling is visibly choppy; the neural surrogate is the planned fix.
@@ -491,6 +525,8 @@ order and unregister them in reverse order, preserving Blender add-on convention
 - `biomechanics_addon/posture_policy.py`: bpy-free posture observation, controllers,
    and policy file I/O.
 - `tools/train_posture.py`: headless posture optimization (evolution strategy).
+- `tools/train_posture_surrogate.py`: learned solver dynamics and gradient-trained
+   posture policy; `tools/surrogate_dashboard.py` + `.html`: live training web page.
 - `biomechanics_addon/distance_heatmap.py`: temporary per-vertex distance heatmap and
    viewport legend.
 - `biomechanics_addon/dataset_io.py`: bpy-free chunked NPZ dataset serialization.
@@ -675,10 +711,12 @@ State at handoff (2026-10-25):
 - Chain: the exported package (`biomechanics_cache/chain_package`) predates the
   femur replacement and the atlas strings; re-export before training. New femur
   meshes need their distance fields recomputed (Precompute Collision Fields).
-- Training: `tools/train_posture.py` policy mode with `--perturb-mm 8 --perturb-deg 4`
-  reached best -0.43 vs passive -2.09 at gravity 0.3 (femur base, before the sternum
-  body) in ~16 generations; the user stopped training. Live view: Move Bones +
-  Posture Controller + Follow Training + Force Colors.
+- Training: `tools/train_posture.py` policy mode with `--perturb-mm 8 --perturb-deg 4
+  --fail-cm 5` (pelvic joints + hold, sternum body) reached -4.83 at generation 6 vs
+  passive -8.5 before it was stopped; the surrogate route
+  (`train_posture_surrogate.py iterate`, 4 rounds) did not beat it (best -6.6), see
+  Bone Chain. Live view: Move Bones + Posture Controller + Follow Training + Force
+  Colors; `surrogate_dashboard.py` at http://localhost:8765 for the network view.
 
 Next steps, in order:
 

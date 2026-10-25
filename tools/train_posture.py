@@ -47,7 +47,9 @@ LOG_FILE = "posture_training_log.json"
 class PostureEnv:
     """Headless chain under gravity; actions are muscle group activations in [0, 1]."""
 
-    def __init__(self, package_dir, steps=40, gravity_mm=None, iterations=None, substeps=None, effort=0.02, perturb_mm=0.0, perturb_deg=0.0, seed=0):
+    FAIL_PENALTY = -10.0
+
+    def __init__(self, package_dir, steps=40, gravity_mm=None, iterations=None, substeps=None, effort=0.02, perturb_mm=0.0, perturb_deg=0.0, seed=0, fail_cm=5.0):
         self.meta, self.arrays = chain_package.load_package(package_dir)
         self.field_cache = {}
         self.steps = steps
@@ -56,6 +58,7 @@ class PostureEnv:
         self.effort = effort
         self.perturb_mm = perturb_mm
         self.perturb_deg = perturb_deg
+        self.fail_cm = fail_cm
         self.rng = np.random.default_rng(seed)
         self.units_per_mm = self.meta["units_per_mm"]
         gravity = None
@@ -121,17 +124,36 @@ class PostureEnv:
         effort = float(np.mean(np.square(activations_used)))
         return height_cm - 0.3 * drift_cm - 0.2 * strain - 0.5 * max(penetration_mm - 1.0, 0.0) - self.effort * effort * 10.0
 
+    def height_cm(self):
+        return (self.solver.bodies[self.top].position[2] - self.rest_top[2]) / self.units_per_mm / 10.0
+
+    def failed(self):
+        """The top bone has dropped by fail_cm or more (or the solver diverged)."""
+        return (not self.solver.is_finite()) or self.height_cm() <= -self.fail_cm
+
     def rollout(self, controller, episodes=1):
-        """Mean score over episodes; with perturbations each episode starts differently."""
+        """Mean score over episodes; with perturbations each episode starts differently.
+
+        An episode that drops the top bone by `fail_cm` ends at once as a failure: its
+        score is FAIL_PENALTY plus a small credit for the steps survived, always below
+        any non-failing score.
+        """
         total = 0.0
         for _episode in range(episodes):
             observation = self.reset()
             used = []
-            for _step in range(self.steps):
+            failed_at = None
+            for step in range(self.steps):
                 activations = controller(observation)
                 used.append(activations)
                 observation = self.step(activations)
-            total += self.score(np.mean(used, axis=0))
+                if self.failed():
+                    failed_at = step + 1
+                    break
+            if failed_at is not None:
+                total += self.FAIL_PENALTY + 2.0 * failed_at / self.steps
+            else:
+                total += self.score(np.mean(used, axis=0))
         return total / episodes
 
 
@@ -145,9 +167,9 @@ _worker_policy = None
 _worker_episodes = 1
 
 
-def _worker_init(package_dir, steps, gravity_mm, iterations, substeps, mode, hidden, effort, perturb_mm, perturb_deg, episodes, seed):
+def _worker_init(package_dir, steps, gravity_mm, iterations, substeps, mode, hidden, effort, perturb_mm, perturb_deg, episodes, seed, fail_cm):
     global _worker_env, _worker_mode, _worker_policy, _worker_episodes
-    _worker_env = PostureEnv(package_dir, steps, gravity_mm, iterations, substeps, effort, perturb_mm, perturb_deg, seed + os.getpid())
+    _worker_env = PostureEnv(package_dir, steps, gravity_mm, iterations, substeps, effort, perturb_mm, perturb_deg, seed + os.getpid(), fail_cm)
     _worker_mode = mode
     _worker_policy = Policy(len(_worker_env.observe()), _worker_env.group_count, hidden) if mode == "policy" else None
     _worker_episodes = episodes
@@ -159,7 +181,7 @@ def _evaluate(vector):
 
 
 def evolve(args):
-    env = PostureEnv(args.package, args.steps, args.gravity, args.iterations, args.substeps, args.effort, args.perturb_mm, args.perturb_deg, args.seed)
+    env = PostureEnv(args.package, args.steps, args.gravity, args.iterations, args.substeps, args.effort, args.perturb_mm, args.perturb_deg, args.seed, args.fail_cm)
     observation_size = len(env.observe())
     if args.mode == "static":
         dimension = env.group_count
@@ -182,7 +204,7 @@ def evolve(args):
         initializer=_worker_init,
         initargs=(
             args.package, args.steps, args.gravity, args.iterations, args.substeps, args.mode, args.hidden, args.effort,
-            args.perturb_mm, args.perturb_deg, args.episodes, args.seed,
+            args.perturb_mm, args.perturb_deg, args.episodes, args.seed, args.fail_cm,
         ),
     )
     log = []
@@ -243,6 +265,7 @@ def main():
     parser.add_argument("--perturb-mm", dest="perturb_mm", type=float, default=0.0, help="random push of 3 bodies at episode start (mm)")
     parser.add_argument("--perturb-deg", dest="perturb_deg", type=float, default=0.0, help="random tilt of those bodies (degrees)")
     parser.add_argument("--episodes", type=int, default=1, help="episodes averaged per evaluation (use >1 with perturbations)")
+    parser.add_argument("--fail-cm", dest="fail_cm", type=float, default=5.0, help="top-bone drop that ends an episode as a failure")
     parser.add_argument("--workers", type=int, default=max(1, os.cpu_count() - 1))
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()

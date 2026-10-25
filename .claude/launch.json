@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "surrogate-dashboard",
+      "runtimeExecutable": ".venv/bin/python",
+      "runtimeArgs": [
+        "tools/surrogate_dashboard.py",
+        "--package",
+        "/Users/hencohen/Google Drive/My Drive/spine/biomechanics_cache/chain_package",
+        "--port",
+        "8765"
+      ],
+      "port": 8765
+    }
+  ]
+}

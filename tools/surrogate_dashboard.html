@@ -1,0 +1,258 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Posture policy training</title>
+<style>
+  :root {
+    --bg: #ffffff; --surface: #f6f5f0; --text: #1f1f1d; --muted: #6b6a64; --border: #d9d7cf;
+    --pos: #378ADD; --neg: #E24B4A; --grid: #e6e4dc; --line: #534AB7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #171716; --surface: #222220; --text: #ecebe4; --muted: #9c9a92; --border: #3a3936; --grid: #2d2d2a; --line: #AFA9EC; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+  h1 { font-size: 18px; font-weight: 500; margin: 0 0 4px; }
+  .status { display: flex; flex-wrap: wrap; gap: 8px 24px; color: var(--muted); margin-bottom: 12px; }
+  .status b { color: var(--text); font-weight: 500; }
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; margin: 8px 0; color: var(--muted); }
+  .controls label { display: flex; align-items: center; gap: 6px; }
+  .legend { display: flex; gap: 16px; align-items: center; color: var(--muted); font-size: 13px; }
+  .swatch { display: inline-block; width: 18px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 4px; }
+  canvas { display: block; width: 100%; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
+  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; margin-top: 12px; }
+  .chart h2 { font-size: 14px; font-weight: 500; margin: 0 0 4px; color: var(--muted); }
+  #tip { position: absolute; pointer-events: none; background: var(--text); color: var(--bg); padding: 4px 8px; border-radius: 6px; font-size: 12px; white-space: pre; display: none; }
+  button { font: inherit; padding: 2px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--surface); color: var(--text); }
+  button.on { border-color: var(--line); color: var(--line); }
+</style>
+</head>
+<body>
+<h1>Posture policy: 126 state values → 32 hidden → 91 muscle groups</h1>
+<div class="status">
+  <span>phase <b id="phase">waiting</b></span>
+  <span>round <b id="round">–</b></span>
+  <span>dataset <b id="dataset">–</b> transitions</span>
+  <span>iteration <b id="iteration">–</b></span>
+  <span>surrogate objective <b id="objective">–</b></span>
+  <span>real-solver score <b id="score">–</b> (best <b id="best">–</b>)</span>
+  <span id="age"></span>
+</div>
+<div class="controls">
+  <span>Node values for</span>
+  <button id="btn-neutral" class="on">neutral pose</button>
+  <button id="btn-pushed">pushed pose</button>
+  <label>hide weights below <input id="threshold" type="range" min="0" max="60" value="15"> <span id="threshold-label">15 %</span> of max</label>
+  <span class="legend">
+    <span><i class="swatch" style="background:var(--pos)"></i>positive weight</span>
+    <span><i class="swatch" style="background:var(--neg)"></i>negative weight</span>
+    <span>opacity = magnitude</span>
+  </span>
+</div>
+<canvas id="net" height="760"></canvas>
+<div class="charts">
+  <div class="chart"><h2>Surrogate objective per iteration (height − effort − fail)</h2><canvas id="objective-chart" height="180"></canvas></div>
+  <div class="chart"><h2>Dynamics fit: held-out normalized error per epoch</h2><canvas id="fit-chart" height="180"></canvas></div>
+  <div class="chart"><h2>Real-solver score per round (fail = −10, passive ≈ −8.5)</h2><canvas id="score-chart" height="180"></canvas></div>
+</div>
+<div id="tip"></div>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const tip = $("tip");
+  let data = null, lastTime = 0, sample = "neutral", threshold = 0.15;
+  const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+  function hex(color, alpha) {
+    const c = color.replace("#", "");
+    const r = parseInt(c.slice(0, 2), 16), g = parseInt(c.slice(2, 4), 16), b = parseInt(c.slice(4, 6), 16);
+    return `rgba(${r},${g},${b},${alpha})`;
+  }
+  function diverging(value, scale) {
+    const t = Math.max(-1, Math.min(1, value / scale));
+    return hex(t >= 0 ? css("--pos") : css("--neg"), 0.15 + 0.85 * Math.abs(t));
+  }
+
+  function fitCanvas(canvas) {
+    const ratio = window.devicePixelRatio || 1;
+    if (!canvas.dataset.height) canvas.dataset.height = canvas.getAttribute("height");
+    const width = canvas.clientWidth, height = parseInt(canvas.dataset.height);
+    canvas.width = width * ratio; canvas.height = height * ratio;
+    canvas.style.height = `${height}px`;
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    return [ctx, width, height];
+  }
+
+  // ---- network ------------------------------------------------------------
+  const net = $("net");
+  let nodes = [];
+  function inputLabel(index, bodies) {
+    const half = bodies.length * 3;
+    const kind = index < half ? "offset" : "rotation";
+    const local = index % half;
+    const body = bodies[Math.floor(local / 3)];
+    return `${body} ${kind} ${"xyz"[local % 3]}`;
+  }
+  function drawNetwork() {
+    const [ctx, width, height] = fitCanvas(net);
+    ctx.clearRect(0, 0, width, height);
+    nodes = [];
+    if (!data || !data.weights) {
+      ctx.fillStyle = css("--muted"); ctx.font = "14px sans-serif";
+      ctx.fillText(data && data.phase ? `waiting for the optimize phase (now: ${data.phase})` : "waiting for the trainer", 16, 28);
+      return;
+    }
+    const { w1, b1, w2, b2 } = data.weights;
+    const s = (data.samples || {})[sample] || {};
+    const bodies = data.meta.bodies || [], groups = data.meta.groups || [];
+    const top = 24, bottom = height - 24;
+    const columns = [
+      { x: 120, count: w1.length, values: s.input || [], label: i => inputLabel(i, bodies), scale: 2.0 },
+      { x: width / 2, count: w1[0].length, values: s.hidden || [], label: i => `hidden ${i}`, scale: 1.0 },
+      { x: width - 170, count: w2[0].length, values: s.output || [], label: i => groups[i] || `group ${i}`, scale: 1.0 },
+    ];
+    const y = (column, i) => top + (bottom - top) * (column.count === 1 ? 0.5 : i / (column.count - 1));
+    let max1 = 0, max2 = 0;
+    for (const row of w1) for (const v of row) max1 = Math.max(max1, Math.abs(v));
+    for (const row of w2) for (const v of row) max2 = Math.max(max2, Math.abs(v));
+    const drawLines = (weights, a, b, max) => {
+      for (let i = 0; i < weights.length; i++) {
+        for (let j = 0; j < weights[i].length; j++) {
+          const v = weights[i][j], m = Math.abs(v) / max;
+          if (m < threshold) continue;
+          ctx.strokeStyle = hex(v >= 0 ? css("--pos") : css("--neg"), 0.05 + 0.6 * m);
+          ctx.lineWidth = 0.5 + 1.5 * m;
+          ctx.beginPath(); ctx.moveTo(a.x + 4, y(a, i)); ctx.lineTo(b.x - 4, y(b, j)); ctx.stroke();
+        }
+      }
+    };
+    drawLines(w1, columns[0], columns[1], max1);
+    drawLines(w2, columns[1], columns[2], max2);
+    ctx.font = "11px sans-serif"; ctx.textBaseline = "middle";
+    columns.forEach((column, c) => {
+      for (let i = 0; i < column.count; i++) {
+        const value = column.values[i];
+        const radius = c === 1 ? 6 : 3.5;
+        ctx.fillStyle = value === undefined ? css("--muted") : c === 2 ? hex(css("--pos"), 0.1 + 0.9 * value) : diverging(value, column.scale);
+        ctx.beginPath(); ctx.arc(column.x, y(column, i), radius, 0, Math.PI * 2); ctx.fill();
+        nodes.push({ x: column.x, y: y(column, i), label: column.label(i), value, bias: c === 1 ? b1[i] : c === 2 ? b2[i] : undefined });
+      }
+    });
+    // Output bars: activation of every muscle group in the chosen pose.
+    if (s.output) {
+      for (let i = 0; i < s.output.length; i++) {
+        ctx.fillStyle = hex(css("--pos"), 0.8);
+        ctx.fillRect(columns[2].x + 10, y(columns[2], i) - 2, 120 * s.output[i], 4);
+      }
+      ctx.fillStyle = css("--muted");
+      ctx.fillText("activation 0 → 1", columns[2].x + 10, 12);
+    }
+    ctx.fillStyle = css("--muted");
+    ctx.textAlign = "center";
+    ctx.fillText("state: bone offsets (cm) and rotations", columns[0].x, 12);
+    ctx.fillText("32 tanh units", columns[1].x, 12);
+    ctx.textAlign = "left";
+    // Bone group labels along the input column.
+    ctx.textAlign = "right";
+    bodies.forEach((body, b) => {
+      for (const [kind, base] of [["Δ", 0], ["θ", bodies.length * 3]]) {
+        const i = base + b * 3 + 1;
+        ctx.fillText(`${kind} ${body}`, columns[0].x - 10, y(columns[0], i));
+      }
+    });
+    ctx.textAlign = "left";
+  }
+  net.addEventListener("mousemove", event => {
+    const rect = net.getBoundingClientRect();
+    const x = event.clientX - rect.left, yy = event.clientY - rect.top;
+    let best = null, bestDistance = 12 * 12;
+    for (const node of nodes) {
+      const d = (node.x - x) ** 2 + (node.y - yy) ** 2;
+      if (d < bestDistance) { best = node; bestDistance = d; }
+    }
+    if (!best) { tip.style.display = "none"; return; }
+    tip.style.display = "block";
+    tip.style.left = `${event.pageX + 12}px`; tip.style.top = `${event.pageY + 12}px`;
+    tip.textContent = `${best.label}\nvalue ${best.value === undefined ? "–" : best.value.toFixed(3)}${best.bias === undefined ? "" : `\nbias ${best.bias.toFixed(3)}`}`;
+  });
+  net.addEventListener("mouseleave", () => (tip.style.display = "none"));
+
+  // ---- charts -------------------------------------------------------------
+  function lineChart(canvas, series, options) {
+    const [ctx, width, height] = fitCanvas(canvas);
+    ctx.clearRect(0, 0, width, height);
+    const pad = { left: 44, right: 12, top: 10, bottom: 22 };
+    const points = series.filter(p => Number.isFinite(p.y));
+    if (points.length < 1) { ctx.fillStyle = css("--muted"); ctx.font = "12px sans-serif"; ctx.fillText("no data yet", pad.left, height / 2); return; }
+    let ymin = Math.min(...points.map(p => p.y)), ymax = Math.max(...points.map(p => p.y));
+    if (options.ymin !== undefined) ymin = Math.min(ymin, options.ymin);
+    if (options.ymax !== undefined) ymax = Math.max(ymax, options.ymax);
+    if (ymax - ymin < 1e-6) { ymax += 1; ymin -= 1; }
+    const xmin = points[0].x, xmax = Math.max(points[points.length - 1].x, xmin + 1);
+    const X = x => pad.left + (width - pad.left - pad.right) * (x - xmin) / (xmax - xmin);
+    const Y = y => pad.top + (height - pad.top - pad.bottom) * (1 - (y - ymin) / (ymax - ymin));
+    ctx.strokeStyle = css("--grid"); ctx.lineWidth = 1; ctx.fillStyle = css("--muted"); ctx.font = "11px sans-serif"; ctx.textAlign = "right"; ctx.textBaseline = "middle";
+    for (let k = 0; k <= 4; k++) {
+      const v = ymin + (ymax - ymin) * k / 4;
+      ctx.beginPath(); ctx.moveTo(pad.left, Y(v)); ctx.lineTo(width - pad.right, Y(v)); ctx.stroke();
+      ctx.fillText(v.toFixed(Math.abs(ymax - ymin) < 2 ? 2 : 1), pad.left - 6, Y(v));
+    }
+    if (options.zero && ymin < 0 && ymax > 0) { ctx.strokeStyle = css("--muted"); ctx.beginPath(); ctx.moveTo(pad.left, Y(0)); ctx.lineTo(width - pad.right, Y(0)); ctx.stroke(); }
+    ctx.textAlign = "center"; ctx.textBaseline = "top";
+    ctx.fillText(String(xmin), X(xmin), height - pad.bottom + 6); ctx.fillText(String(xmax), X(xmax), height - pad.bottom + 6);
+    ctx.strokeStyle = css("--line"); ctx.lineWidth = 2; ctx.lineJoin = "round";
+    if (options.dots) {
+      for (const p of points) { ctx.fillStyle = css("--line"); ctx.beginPath(); ctx.arc(X(p.x), Y(p.y), 4, 0, Math.PI * 2); ctx.fill(); }
+    } else {
+      ctx.beginPath(); points.forEach((p, i) => (i ? ctx.lineTo(X(p.x), Y(p.y)) : ctx.moveTo(X(p.x), Y(p.y)))); ctx.stroke();
+    }
+    canvas.onmousemove = event => {
+      const rect = canvas.getBoundingClientRect();
+      const x = event.clientX - rect.left;
+      let best = points[0];
+      for (const p of points) if (Math.abs(X(p.x) - x) < Math.abs(X(best.x) - x)) best = p;
+      tip.style.display = "block"; tip.style.left = `${event.pageX + 12}px`; tip.style.top = `${event.pageY + 12}px`;
+      tip.textContent = `${options.xlabel} ${best.x}\n${options.ylabel} ${best.y.toFixed(3)}${best.extra || ""}`;
+    };
+    canvas.onmouseleave = () => (tip.style.display = "none");
+  }
+
+  function render() {
+    if (!data) return;
+    $("phase").textContent = data.phase || "–";
+    $("round").textContent = data.round === undefined ? "–" : data.round;
+    $("dataset").textContent = data.dataset ? data.dataset.toLocaleString() : "–";
+    $("iteration").textContent = data.iteration === undefined ? "–" : data.iteration;
+    const opt = data.optimize || [];
+    $("objective").textContent = opt.length ? opt[opt.length - 1].objective.toFixed(3) : "–";
+    const scores = data.real_scores || [];
+    $("score").textContent = scores.length ? scores[scores.length - 1].score.toFixed(3) : "–";
+    $("best").textContent = scores.length ? Math.max(...scores.map(s => s.score)).toFixed(3) : "–";
+    $("age").textContent = data.time ? `updated ${Math.max(0, Math.round(Date.now() / 1000 - data.time))} s ago` : "";
+    drawNetwork();
+    lineChart($("objective-chart"), opt.map(p => ({ x: p.iter, y: p.objective, extra: `\nheight ${p.height.toFixed(2)} cm, effort ${p.effort.toFixed(3)}, fail ${p.fail.toFixed(3)}` })), { xlabel: "iteration", ylabel: "objective", zero: true });
+    lineChart($("fit-chart"), (data.fit || []).map(p => ({ x: p.epoch, y: p.test, extra: `\ntrain ${p.train.toFixed(3)}, position error ${p.mm.toFixed(3)} mm/step` })), { xlabel: "epoch", ylabel: "test error", ymin: 0 });
+    lineChart($("score-chart"), scores.map((s, i) => ({ x: i, y: s.score })), { xlabel: "evaluation", ylabel: "score", dots: true, ymin: -10, ymax: 0, zero: true });
+  }
+
+  async function poll() {
+    try {
+      const response = await fetch("/live.json", { cache: "no-store" });
+      const next = await response.json();
+      if (next.time !== lastTime) { data = next; lastTime = next.time; render(); }
+      else if (data) $("age").textContent = `updated ${Math.max(0, Math.round(Date.now() / 1000 - data.time))} s ago`;
+    } catch (error) { $("phase").textContent = "dashboard server unreachable"; }
+    setTimeout(poll, 1000);
+  }
+  $("btn-neutral").onclick = () => { sample = "neutral"; $("btn-neutral").classList.add("on"); $("btn-pushed").classList.remove("on"); drawNetwork(); };
+  $("btn-pushed").onclick = () => { sample = "pushed"; $("btn-pushed").classList.add("on"); $("btn-neutral").classList.remove("on"); drawNetwork(); };
+  $("threshold").oninput = event => { threshold = event.target.value / 100; $("threshold-label").textContent = `${event.target.value} %`; drawNetwork(); };
+  window.addEventListener("resize", render);
+  poll();
+})();
+</script>
+</body>
+</html>

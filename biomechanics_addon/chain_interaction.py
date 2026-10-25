@@ -566,7 +566,18 @@ class ChainSession:
             "controller": self.controller is not None,
             "policy_score": self.policy_score,
             "policy_generation": self.policy_generation,
+            "height_cm": self.top_height_cm(scene),
         }
+
+    def top_height_cm(self, scene):
+        """Top chain bone height relative to session start, in cm (negative = lower)."""
+        top = scene.biomechanics_chain_top
+        body = self.bodies.get(top)
+        start = self.start_matrices.get(self.objects.get(top, ""))
+        if body is None or start is None:
+            return 0.0
+        start_center = np.array(start.to_3x3()) @ self.centers[top] + np.array(start.translation)
+        return float(body.position[2] - start_center[2]) * _units(scene) / 10.0
 
 
 class _CenteredField:

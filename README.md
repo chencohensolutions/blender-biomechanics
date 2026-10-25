@@ -83,6 +83,7 @@ files when diagnosing a run.
 - `biomechanics_addon/chain_solver.py`, `chain_interaction.py`: drag a vertebra and the chain follows through ligaments, discs, bone contact, gravity, and active muscles.
 - `biomechanics_addon/atlas_import.py`: muscles and ligaments from a registered Z-Anatomy atlas (CC BY-SA 4.0).
 - `biomechanics_addon/chain_package.py`, `posture_policy.py`, `tools/train_posture.py`: export the chain and train a muscle posture controller headlessly (`.venv/bin/python tools/train_posture.py --package <dir> --mode policy`).
+- `tools/train_posture_surrogate.py`: the fast route. Learns the chain solver once (`collect`, `fit`), then trains the same controller by gradients through the learned dynamics (`optimize`), and checks it in the real solver; `iterate` repeats collect/fit/optimize rounds (`.venv/bin/python tools/train_posture_surrogate.py iterate --package <dir> --rounds 4`). `tools/surrogate_dashboard.py --package <dir>` serves http://localhost:8765 with the policy network drawn live (weights as red/blue lines, node values, training curves) while it trains.
 - `biomechanics_addon/neural_geometry.py`: evaluated mesh geometry and pose labeling helpers.
 - `biomechanics_addon/neural_training.py`: bpy-free launch, status, and artifact helpers.
 - `biomechanics_addon/operators.py`: user actions and input validation.
