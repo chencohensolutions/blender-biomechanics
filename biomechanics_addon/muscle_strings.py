@@ -167,7 +167,9 @@ class _LandmarkResolver:
             mode = spec[2] if len(spec) > 2 else "extreme"
             near_bone, tolerance = None, 0.0
         anterior, left, superior = self._bone_coordinates(bone)
-        lateral_sign = 0.0 if side == MIDLINE else (1.0 if side == "L" else -1.0)
+        # Midline strings keep a real lateral axis (left positive) so ring landmarks
+        # spread around the endplate instead of collapsing onto the anterior-posterior line.
+        lateral_sign = -1.0 if side == "R" else 1.0
         lateral = left * lateral_sign
         midline_distance = np.abs(left - np.median(left))
         axes = {"A": anterior, "S": superior, "L": lateral, "M": midline_distance}
@@ -290,7 +292,7 @@ def _create_string(collection, bone_collection, string, attachments, scene):
         "kind": string.get("kind", "muscle"),
         "attachments": [[bone.name, index] for bone, index in attachments],
     }
-    for key in ("compliance", "unilateral", "slack"):
+    for key in ("compliance", "unilateral", "slack", "mode"):
         if key in string:
             info[key] = string[key]
     obj[STRING_PROPERTY] = json.dumps(info)

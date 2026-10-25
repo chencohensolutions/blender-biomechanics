@@ -10,15 +10,22 @@ from .correspondence import (
     max_distance_results,
 )
 from .distance_heatmap import BIOMECHANICS_OT_toggle_distance_heatmap, is_heatmap_active
+from .atlas_import import BIOMECHANICS_OT_import_atlas_ligaments, BIOMECHANICS_OT_import_atlas_muscles
 from .chain_interaction import (
+    BIOMECHANICS_OT_export_chain_package,
     BIOMECHANICS_OT_precompute_chain_fields,
+    BIOMECHANICS_OT_reset_rigid_to_original,
     BIOMECHANICS_OT_select_chain_target,
     BIOMECHANICS_OT_start_chain,
     BIOMECHANICS_OT_stop_chain,
+    BIOMECHANICS_OT_toggle_force_colors,
     BIOMECHANICS_OT_toggle_move_bones,
+    BIOMECHANICS_OT_toggle_posture_controller,
     chain_ready,
     fields_missing,
     is_active as is_chain_active,
+    is_controller_active,
+    is_force_colors_active,
     is_free_mode,
     session as chain_session,
 )
@@ -232,6 +239,9 @@ class BIOMECHANICS_PT_muscle_panel(bpy.types.Panel):
         sheet_row = scale_column.row()
         sheet_row.enabled = sheets_active
         sheet_row.prop(context.scene, "biomechanics_muscle_sheet_range")
+        atlas_row = layout.row(align=True)
+        atlas_row.operator(BIOMECHANICS_OT_import_atlas_muscles.bl_idname, icon="IMPORT")
+        atlas_row.operator(BIOMECHANICS_OT_import_atlas_ligaments.bl_idname, icon="IMPORT")
         layout.operator(BIOMECHANICS_OT_export_muscle_lengths.bl_idname, icon="EXPORT")
         for bones, kind, collection in sorted(string_collections(context.scene)):
             layout.label(text=f"{bones} {kind}s: {len(collection.objects)}", icon="DOT")
@@ -348,6 +358,38 @@ class BIOMECHANICS_PT_chain_panel(bpy.types.Panel):
         gravity_value = gravity_row.row()
         gravity_value.enabled = scene.biomechanics_chain_gravity
         gravity_value.prop(scene, "biomechanics_chain_gravity_mm", text="")
+        muscles = layout.column(align=True)
+        controller_on = is_controller_active()
+        tone_row = muscles.row()
+        tone_row.enabled = not controller_on
+        tone_row.prop(scene, "biomechanics_muscle_tone")
+        strength_row = muscles.row()
+        strength_row.enabled = not active
+        strength_row.prop(scene, "biomechanics_muscle_strength_mm")
+        controller_row = muscles.row(align=True)
+        controller_row.enabled = active
+        controller_row.operator(
+            BIOMECHANICS_OT_toggle_posture_controller.bl_idname,
+            text="Posture Controller: On" if controller_on else "Posture Controller: Off",
+            icon="ARMATURE_DATA",
+            depress=controller_on,
+        )
+        muscles.prop(scene, "biomechanics_posture_policy_path", text="")
+        follow_row = muscles.row()
+        follow_row.enabled = active
+        follow_row.prop(scene, "biomechanics_follow_training")
+        force_on = is_force_colors_active()
+        force_row = layout.row()
+        force_row.enabled = active or force_on
+        force_row.operator(
+            BIOMECHANICS_OT_toggle_force_colors.bl_idname,
+            text="Force Colors: On" if force_on else "Force Colors: Off",
+            icon="COLOR",
+            depress=force_on,
+        )
+        if force_on:
+            _wrapped_labels(layout, "Red: muscle activation. Blue: force carried by ligament or disc.", "INFO", context)
+        layout.operator(BIOMECHANICS_OT_reset_rigid_to_original.bl_idname, icon="FILE_REFRESH")
         missing = fields_missing(scene)
         row = layout.row()
         row.enabled = not active
@@ -371,9 +413,17 @@ class BIOMECHANICS_PT_chain_panel(bpy.types.Panel):
             row = layout.row(align=True)
             row.operator(BIOMECHANICS_OT_stop_chain.bl_idname, text="Stop, Keep Pose", icon="PAUSE").restore = False
             row.operator(BIOMECHANICS_OT_stop_chain.bl_idname, text="Stop, Reset", icon="LOOP_BACK").restore = True
+            layout.operator(BIOMECHANICS_OT_export_chain_package.bl_idname, icon="EXPORT")
             status = chain_session().status(scene)
             column = layout.column(align=True)
             column.label(text=f"{status['bodies'] - 1} bones, {status['constraints']} constraints", icon="DOT")
+            column.label(text=f"{status['muscles']} muscle strings in {status['muscle_groups']} groups", icon="DOT")
+            column.label(text=f"Mean activation {status['activation_mean']:.2f}", icon="DOT")
+            if status["policy_score"] is not None:
+                column.label(
+                    text=f"Policy generation {status['policy_generation']}, score {status['policy_score']:.2f}",
+                    icon="DOT",
+                )
             column.label(text=f"Penetration {status['penetration_mm']:.2f} mm", icon="DOT")
             column.label(text=f"Max ligament strain {status['strain_percent']:.1f}%", icon="DOT")
             column.label(text=f"Solve {status['solve_ms']:.0f} ms", icon="DOT")

@@ -31,7 +31,8 @@ class LigamentAtlasTest(unittest.TestCase):
     def test_every_string_has_mechanics_and_scene_bones(self):
         for string in self.strings:
             self.assertIn(string["kind"], ("ligament", "disc"))
-            self.assertGreater(string["compliance"], 0.0)
+            self.assertGreaterEqual(string["compliance"], 0.0)
+            self.assertIn(string["mode"], ("both", "tension", "compression"))
             self.assertIn(string["unilateral"], (True, False))
             self.assertGreaterEqual(len(string["points"]), 2)
             for point in string["points"]:
@@ -53,14 +54,25 @@ class LigamentAtlasTest(unittest.TestCase):
         annulus = [s for s in self.strings if s["group"] == "disc_annulus"]
         self.assertEqual(len(nucleus), 17)  # T01-T02 ... L4-L5 and L5-S1
         self.assertEqual(len(annulus), 17 * ligaments.RING_POINTS)
+        fibers = [s for s in self.strings if s["group"] == "disc_fibers"]
+        self.assertEqual(len(fibers), 17 * ligaments.RING_POINTS * 2)
+        struts = [s for s in self.strings if s["group"] == "disc_strut"]
+        self.assertEqual(len(struts), 17)
+        self.assertTrue(all(s["mode"] == "compression" for s in struts))
         for string in nucleus + annulus:
             self.assertFalse(string["unilateral"])
         self.assertLess(nucleus[0]["compliance"], annulus[0]["compliance"])
 
     def test_ligaments_resist_tension_only(self):
         for string in self.strings:
-            if string["kind"] == "ligament":
+            if string["kind"] == "ligament" and string["group"] != "costal_cartilage":
                 self.assertTrue(string["unilateral"], string["label"])
+        cartilage = [s for s in self.strings if s["group"] == "costal_cartilage"]
+        self.assertEqual(len(cartilage), 2 * (7 + 3))
+        self.assertTrue(all(s["mode"] == "both" for s in cartilage))
+        for string in self.strings:
+            if string["group"] == "disc_fibers":
+                self.assertEqual(string["mode"], "tension")
 
     def test_keys_are_unique(self):
         keys = [atlas.string_key(string) for string in self.strings]

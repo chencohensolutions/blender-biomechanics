@@ -12,6 +12,7 @@ to the static equilibrium of ligaments, discs, and contacts. Ribs of chain
 vertebrae follow their vertebra rigidly.
 """
 
+import os
 import time
 
 import bpy  # pyright: ignore[reportMissingImports]
@@ -20,11 +21,33 @@ from bpy.app.handlers import persistent  # pyright: ignore[reportMissingImports]
 from mathutils import Matrix  # pyright: ignore[reportMissingImports]
 
 from .alignment import base_object_name, local_vertices
-from .bone_fields import field_for_object, has_cached_field, surface_samples
-from .chain_solver import Body, ChainSolver, CollisionPair, DistanceConstraint, PoseConstraint, matrix_to_quat
-from .muscle_atlas import SPINE
-from .muscle_strings import muscle_collections, string_info
+from .bone_fields import field_for_object, field_path, has_cached_field, surface_samples
+from .chain_package import package_from_session, save_package
+from .posture_policy import ChainState, controller_from_policy, load_policy
+from .chain_solver import (
+    Body,
+    ChainSolver,
+    CollisionPair,
+    DistanceConstraint,
+    MuscleElement,
+    PoseConstraint,
+    matrix_to_quat,
+)
+from .muscle_atlas import SPINE, THORACIC
+from .muscle_strings import (
+    _restore_string_color,
+    _set_string_color,
+    apply_delta_colors,
+    cached_object,
+    is_delta_active,
+    muscle_collections,
+    string_info,
+)
 
+FEMUR_BASE = "femurs"
+FEMURS = ("femur L", "femur R")
+PELVIS = ("ilium L", "ilium R", "sacrum")
+STERNUM = "strenum"
 TARGET_NAME = "Biomechanics Chain Target"
 TARGET_PROPERTY = "biomechanics_chain_target"
 SETTLE_INTERVAL = 0.03
@@ -33,6 +56,16 @@ MAX_SETTLE_SOLVES = 150
 
 _session = None
 _solving = False
+_force_colors = False
+FORCE_BINS = 12
+MUSCLE_COLOR_LOW = (0.92, 0.86, 0.86)
+MUSCLE_COLOR_HIGH = (1.0, 0.08, 0.04)
+LIGAMENT_COLOR_LOW = (0.86, 0.88, 0.94)
+LIGAMENT_COLOR_HIGH = (0.05, 0.3, 1.0)
+
+
+class SolverDiverged(RuntimeError):
+    pass
 
 
 class ChainSession:
@@ -49,6 +82,16 @@ class ChainSession:
         self.solver = None
         self.pose = None
         self.pinned_top = None
+        self.muscle_groups = []  # (muscle key, side) per activation index
+        self.anchors = {}  # fixed bodies added only to anchor muscles
+        self.field_paths = {}  # body name -> cached field file, for export
+        self.controller = None  # posture controller: observation -> activations
+        self.state = None
+        self.policy_score = None
+        self.policy_generation = None
+        self.policy_steps = None  # episode length the policy was trained for
+        self.replay_budget = None  # solves left in a Follow Training replay
+        self.force_scale = 0.0  # running maximum ligament force, for Force Colors
         self.last_solve_ms = 0.0
         self.settle_count = 0
         self.last_movement = 0.0
@@ -63,21 +106,24 @@ class ChainSession:
                 by_base.setdefault(base_object_name(obj.name), obj)
         base = scene.biomechanics_chain_base
         top = scene.biomechanics_chain_top
-        if base not in by_base:
-            raise ValueError(f"Base bone {base} is not in {rigid.name}")
-        chain = chain_levels(base, top)
-        if handle is not None and base_object_name(handle.name) not in chain:
+        pelvis_free = base == FEMUR_BASE
+        fixed_names, pelvis = (set(FEMURS), list(FEMURS) + list(PELVIS)) if pelvis_free else ({base}, [base])
+        chain = chain_levels("sacrum" if pelvis_free else base, top)
+        # The sternum is carried by the costal cartilages of whichever ribs are in the chain.
+        extras = [STERNUM] if STERNUM in by_base and any(level in chain for level in THORACIC) else []
+        grabbable = chain + (list(PELVIS) if pelvis_free else []) + extras
+        if handle is not None and base_object_name(handle.name) not in grabbable:
             raise ValueError(f"{handle.name} is not between {base} and {top}")
-        missing = [name for name in chain if name not in by_base]
+        missing = [name for name in pelvis + chain if name not in by_base]
         if missing:
             raise ValueError(f"Missing chain bones: {', '.join(missing)}")
 
         bones = {}
-        pinned = {base}
+        pinned = set(fixed_names)
         if scene.biomechanics_chain_pin_top and (handle is None or chain[-1] != base_object_name(handle.name)):
             pinned.add(chain[-1])
             self.pinned_top = chain[-1]
-        for name in [base] + chain:
+        for name in pelvis + chain + extras:
             obj = by_base[name]
             vertices = local_vertices(obj)
             center = vertices.mean(axis=0)
@@ -101,22 +147,34 @@ class ChainSession:
         self.bodies = bones
 
         constraints = self._ligament_constraints(scene, by_base)
+        muscles = self._muscle_elements(scene, by_base, chain)
         pairs = []
         margin = scene.biomechanics_chain_margin_mm / _units(scene)
-        ordered = [base] + chain
-        for lower, upper in zip(ordered, ordered[1:]):
+        contacts = list(zip(["sacrum" if pelvis_free else base] + chain, chain))
+        if pelvis_free:
+            # Hip joints, sacroiliac joints, and the pubic symphysis.
+            contacts = [
+                ("femur L", "ilium L"), ("femur R", "ilium R"),
+                ("ilium L", "sacrum"), ("ilium R", "sacrum"), ("ilium L", "ilium R"),
+            ] + contacts
+        for lower, upper in contacts:
             pairs.append(self._collision_pair(scene, by_base, lower, upper, margin))
 
         self.solver = ChainSolver(
-            bones.values(),
+            list(bones.values()) + list(self.anchors.values()),
             constraints,
             pairs,
             [],
             iterations=scene.biomechanics_chain_iterations,
             substeps=scene.biomechanics_chain_substeps,
             gravity=_gravity_vector(scene),
+            muscles=muscles,
+            group_count=len(self.muscle_groups),
         )
         self.constraint_count = len(constraints)
+        self.muscle_count = len(muscles)
+        self.state = ChainState(self.solver, 1.0 / _units(scene))
+        self.set_tone(scene.biomechanics_muscle_tone)
         self._collect_followers(scene, rigid, chain)
         if handle is not None:
             self.set_handle(scene, base_object_name(handle.name))
@@ -174,8 +232,8 @@ class ChainSession:
             info = string_info(obj)
             if info is None:
                 continue
-            names = [base_object_name(bone) for bone, _index in info["attachments"]]
-            if any(name not in self.bodies for name in names):
+            points = [self._muscle_attachment(scene, by_base, bone, index, chain=None) for bone, index in info["attachments"]]
+            if any(point is None for point in points) or all(point[0].fixed for point in points):
                 continue
             rest_info = source_by_key.get((info["muscle"], info["side"], info["index"]))
             if rest_info is None:
@@ -183,34 +241,114 @@ class ChainSession:
             rest_points = [_world_vertex(bone, index) for bone, index in rest_info["attachments"]]
             if any(point is None for point in rest_points):
                 continue
-            for segment in range(len(names) - 1):
-                name_a, name_b = names[segment], names[segment + 1]
-                if name_a == name_b:
+            for segment in range(len(points) - 1):
+                (body_a, local_a), (body_b, local_b) = points[segment], points[segment + 1]
+                if body_a is body_b:
                     continue
-                index_a = info["attachments"][segment][1]
-                index_b = info["attachments"][segment + 1][1]
-                local_a = _local_offset(by_base[name_a], index_a, self.centers[name_a])
-                local_b = _local_offset(by_base[name_b], index_b, self.centers[name_b])
                 rest = float(np.linalg.norm(rest_points[segment + 1] - rest_points[segment]))
                 constraints.append(
                     DistanceConstraint(
-                        self.bodies[name_a],
+                        body_a,
                         local_a,
-                        self.bodies[name_b],
+                        body_b,
                         local_b,
                         rest,
                         compliance=info.get("compliance", 0.5),
                         unilateral=info.get("unilateral", True),
                         slack=info.get("slack", 0.0),
                         name=obj.name,
+                        mode=info.get("mode"),
                     )
                 )
         return constraints
+
+    def _anchor_body(self, obj):
+        """A fixed body for a bone outside the chain that muscles pull against."""
+        name = base_object_name(obj.name)
+        body = self.anchors.get(name)
+        if body is None:
+            vertices = local_vertices(obj)
+            center = vertices.mean(axis=0)
+            matrix = np.array(obj.matrix_world, dtype=np.float64)
+            body = Body(name, matrix[:3, :3] @ center + matrix[:3, 3], matrix_to_quat(matrix[:3, :3]), fixed=True)
+            body.radius = 0.05
+            self.anchors[name] = body
+            self.centers[name] = center
+        return body
+
+    def _muscle_attachment(self, scene, by_base, bone_name, index, chain):
+        """Map a muscle attachment to (body, local offset); rib points ride on their vertebra."""
+        base = base_object_name(bone_name)
+        obj = bpy.data.objects.get(bone_name)
+        if obj is None:
+            return None
+        if base in self.bodies:
+            return self.bodies[base], _local_offset(obj, index, self.centers[base])
+        if " rib " in f" {base} ":
+            vertebra = base.split(" rib ")[0]
+            if vertebra not in self.bodies:
+                return None
+            leader = by_base[vertebra]
+            # Ribs follow their vertebra rigidly, so express the rib vertex in the vertebra frame.
+            local = leader.matrix_world.inverted() @ obj.matrix_world @ obj.data.vertices[index].co
+            return self.bodies[vertebra], np.array(local, dtype=np.float64) - self.centers[vertebra]
+        if base in ("sacrum", "ilium L", "ilium R", "femur L", "femur R", STERNUM):
+            body = self._anchor_body(by_base[base]) if base in by_base else None
+            if body is None:
+                return None
+            return body, _local_offset(by_base[base], index, self.centers[base])
+        return None
+
+    def _muscle_elements(self, scene, by_base, chain):
+        muscle_sets = muscle_collections(scene, "muscle")
+        strings = muscle_sets.get(scene.biomechanics_target_collection.name)
+        if strings is None:
+            return []
+        strength = scene.biomechanics_muscle_strength_mm / _units(scene)
+        group_index = {}
+        elements = []
+        for obj in strings.objects:
+            info = string_info(obj)
+            if info is None:
+                continue
+            points = [self._muscle_attachment(scene, by_base, bone, index, chain) for bone, index in info["attachments"]]
+            if any(point is None for point in points):
+                continue
+            if all(point[0].fixed for point in points):
+                continue
+            key = (info["muscle"], info["side"])
+            if key not in group_index:
+                group_index[key] = len(self.muscle_groups)
+                self.muscle_groups.append(key)
+            for (body_a, local_a), (body_b, local_b) in zip(points, points[1:]):
+                if body_a is body_b:
+                    continue
+                elements.append(MuscleElement(body_a, local_a, body_b, local_b, group_index[key], strength, name=obj.name))
+        return elements
+
+    def set_tone(self, tone):
+        """Uniform activation for every muscle group (manual test of the actuators)."""
+        if self.solver is not None and self.controller is None:
+            self.solver.activations[:] = float(tone)
+
+    def set_controller(self, path):
+        """Load a trained posture policy; None clears it and returns to Muscle Tone."""
+        if path is None:
+            self.controller = None
+            self.policy_score = None
+            return
+        policy = load_policy(path)
+        self.controller = controller_from_policy(policy, self.state.size, len(self.muscle_groups))
+        self.policy_score = policy["score"]
+        self.policy_generation = policy["generation"]
+        self.policy_steps = policy["steps"]
 
     def _collision_pair(self, scene, by_base, name_a, name_b, margin):
         obj_a, obj_b = by_base[name_a], by_base[name_b]
         field_a = field_for_object(obj_a, scene)
         field_b = field_for_object(obj_b, scene)
+        self.field_paths[name_a] = field_path(scene, obj_a, 1.0)
+        self.field_paths[name_b] = field_path(scene, obj_b, 1.0)
         samples_a = surface_samples(obj_a) - self.centers[name_a]
         samples_b = surface_samples(obj_b) - self.centers[name_b]
         # Fields are in object-local coordinates; bodies are centered, so shift the field origin.
@@ -261,7 +399,13 @@ class ChainSession:
         self.solver.iterations = scene.biomechanics_chain_iterations
         self.solver.substeps = scene.biomechanics_chain_substeps
         self.solver.gravity = _gravity_vector(scene)
+        if self.controller is not None:
+            self.solver.activations[:] = np.clip(self.controller(self.state.observe()), 0.0, 1.0)
         self.solver.solve()
+        if not self.solver.is_finite() or self._runaway():
+            raise SolverDiverged("chain solver diverged")
+        if _force_colors:
+            apply_force_colors(self)
         self.last_movement = max(
             float(np.linalg.norm(body.position - before[name])) for name, body in self.bodies.items()
         )
@@ -287,6 +431,14 @@ class ChainSession:
                 follower.matrix_world = leader.matrix_world @ relative
         self.last_solve_ms = (time.perf_counter() - started) * 1000.0
 
+    def _runaway(self, limit=0.5):
+        """True when any body is more than `limit` meters from where it started."""
+        for name, body in self.bodies.items():
+            start = self.start_matrices.get(self.objects[name])
+            if start is not None and np.linalg.norm(body.position - np.array(start.translation) - body.rotation @ self.centers[name]) > limit:
+                return True
+        return False
+
     def restore(self):
         for name, matrix in self.start_matrices.items():
             obj = bpy.data.objects.get(name)
@@ -301,6 +453,12 @@ class ChainSession:
             "solve_ms": self.last_solve_ms,
             "bodies": len(self.bodies),
             "constraints": self.constraint_count,
+            "muscles": self.muscle_count,
+            "muscle_groups": len(self.muscle_groups),
+            "activation_mean": float(self.solver.activations.mean()) if len(self.solver.activations) else 0.0,
+            "controller": self.controller is not None,
+            "policy_score": self.policy_score,
+            "policy_generation": self.policy_generation,
         }
 
 
@@ -364,8 +522,11 @@ def chain_levels(base, top):
 
 
 def chain_bone_names(scene):
+    base = scene.biomechanics_chain_base
     try:
-        return [scene.biomechanics_chain_base] + chain_levels(scene.biomechanics_chain_base, scene.biomechanics_chain_top)
+        if base == FEMUR_BASE:
+            return list(FEMURS) + list(PELVIS) + chain_levels("sacrum", scene.biomechanics_chain_top)
+        return [base] + chain_levels(base, scene.biomechanics_chain_top)
     except ValueError:
         return []
 
@@ -410,6 +571,8 @@ def stop_session(scene, restore=False):
     global _session
     if _session is not None and restore:
         _session.restore()
+    if _session is not None and _force_colors:
+        _restore_force_colors(_session)
     _session = None
     if bpy.app.timers.is_registered(_settle):
         bpy.app.timers.unregister(_settle)
@@ -430,9 +593,30 @@ def _solve_now(scene):
             if target is None:
                 return
             _session.set_target(target.matrix_world)
-        _session.solve_and_apply(scene)
+        try:
+            _session.solve_and_apply(scene)
+        except SolverDiverged:
+            _recover_session(scene)
     finally:
         _solving = False
+
+
+def _recover_session(scene):
+    """Put the bones back where the session started and rebuild it (controller kept)."""
+    global _session
+    old = _session
+    old.restore()
+    bpy.context.view_layer.update()
+    path = bpy.path.abspath(scene.biomechanics_posture_policy_path) if old.controller is not None else None
+    rebuilt = ChainSession(scene, None if old.free_mode else bpy.data.objects.get(old.handle_name))
+    if path is not None:
+        try:
+            rebuilt.set_controller(path)
+        except (OSError, ValueError, KeyError):
+            pass
+    rebuilt.force_scale = 0.0
+    _session = rebuilt
+    print("Biomechanics: chain solver diverged; pose restored and session rebuilt")
 
 
 def _kick_settle():
@@ -447,6 +631,8 @@ def _settle():
     scene = bpy.context.scene
     if _session is None:
         return None
+    if _session.replay_budget is not None and _session.settle_count >= _session.replay_budget:
+        return None  # the replay ran the trained episode length; hold the pose
     if _session.last_movement <= SETTLE_THRESHOLD or _session.settle_count >= MAX_SETTLE_SOLVES:
         return None
     _session.settle_count += 1
@@ -501,6 +687,13 @@ def chain_depsgraph_update(_scene, depsgraph):
         bpy.app.timers.register(_settle, first_interval=SETTLE_INTERVAL)
 
 
+def update_tone(scene, _context):
+    if _session is None:
+        return
+    _session.set_tone(scene.biomechanics_muscle_tone)
+    update_gravity(scene, _context)
+
+
 def update_gravity(scene, _context):
     if _session is None:
         return
@@ -529,7 +722,8 @@ def chain_ready(scene):
     if scene.biomechanics_target_collection.name not in muscle_collections(scene, "ligament"):
         return False, "Build Ligaments & Discs first"
     try:
-        chain_levels(scene.biomechanics_chain_base, scene.biomechanics_chain_top)
+        base = scene.biomechanics_chain_base
+        chain_levels("sacrum" if base == FEMUR_BASE else base, scene.biomechanics_chain_top)
     except ValueError as error:
         return False, str(error)
     return True, ""
@@ -597,6 +791,269 @@ class BIOMECHANICS_OT_start_chain(bpy.types.Operator):
         self.report(
             {"INFO"},
             f"Chain of {len(chain.bodies) - 1} bones with {chain.constraint_count} constraints; move {TARGET_NAME}",
+        )
+        return {"FINISHED"}
+
+
+def export_package(scene, directory):
+    """Write the active session as a bpy-free chain package."""
+    from .muscle_atlas import muscle_strings
+
+    if _session is None:
+        raise ValueError("Start Move Bones first")
+    group_of = {string["muscle"]: string["group"] for string in muscle_strings()}
+    settings = {
+        "base": scene.biomechanics_chain_base,
+        "top": scene.biomechanics_chain_top,
+        "units_per_mm": 1.0 / _units(scene),
+        "field_paths": dict(_session.field_paths),
+        "group_labels": [group_of.get(muscle, "") for muscle, _side in _session.muscle_groups],
+    }
+    meta, arrays = package_from_session(_session, settings)
+    save_package(directory, meta, arrays)
+    return meta
+
+
+def _force_material(prefix, index, low, high):
+    name = f"Biomechanics Force {prefix} {index:02d}"
+    material = bpy.data.materials.get(name)
+    if material is None:
+        material = bpy.data.materials.new(name)
+    weight = index / (FORCE_BINS - 1)
+    color = tuple(l + (h - l) * weight for l, h in zip(low, high)) + (1.0,)
+    if any(abs(c - w) > 1e-4 for c, w in zip(material.diffuse_color, color)):
+        material.diffuse_color = color
+    return material
+
+
+def apply_force_colors(session):
+    """Tint muscle strings red by activation and ligament strings blue by carried force."""
+    solver = session.solver
+    muscle_materials = [_force_material("Muscle", i, MUSCLE_COLOR_LOW, MUSCLE_COLOR_HIGH) for i in range(FORCE_BINS)]
+    ligament_materials = [_force_material("Ligament", i, LIGAMENT_COLOR_LOW, LIGAMENT_COLOR_HIGH) for i in range(FORCE_BINS)]
+    forces = {}
+    for constraint, lagrange in zip(solver.distance_constraints, solver.c_lagrange):
+        forces[constraint.name] = max(forces.get(constraint.name, 0.0), abs(float(lagrange)))
+    current_max = max(forces.values(), default=0.0)
+    # Running maximum with slow decay keeps the scale steady while bones move.
+    session.force_scale = max(current_max, session.force_scale * 0.98)
+    scale = session.force_scale if session.force_scale > 1e-12 else 1.0
+    for name, force in forces.items():
+        obj = cached_object(name)
+        if obj is not None:
+            _set_string_color(obj, ligament_materials[min(FORCE_BINS - 1, int(round(force / scale * (FORCE_BINS - 1))))])
+    activations = solver.activations
+    seen = set()
+    for muscle in solver.muscles:
+        if muscle.name in seen:
+            continue
+        seen.add(muscle.name)
+        obj = cached_object(muscle.name)
+        if obj is not None:
+            level = float(np.clip(activations[muscle.group], 0.0, 1.0))
+            _set_string_color(obj, muscle_materials[int(round(level * (FORCE_BINS - 1)))])
+
+
+def _restore_force_colors(session):
+    if session is None:
+        return
+    names = {c.name for c in session.solver.distance_constraints} | {m.name for m in session.solver.muscles}
+    for name in names:
+        obj = cached_object(name)
+        if obj is not None:
+            _restore_string_color(obj)
+    if is_delta_active():
+        apply_delta_colors(bpy.context.scene)
+
+
+def is_force_colors_active():
+    return _force_colors
+
+
+class BIOMECHANICS_OT_toggle_force_colors(bpy.types.Operator):
+    """Toggle Force Colors: muscles red by activation, ligaments and discs blue by carried force"""
+
+    bl_idname = "biomechanics.toggle_force_colors"
+    bl_label = "Force Colors"
+
+    @classmethod
+    def poll(cls, _context):
+        return is_active() or _force_colors
+
+    def execute(self, context):
+        global _force_colors
+        if _force_colors:
+            _force_colors = False
+            _restore_force_colors(_session)
+        else:
+            _force_colors = True
+            if _session is not None:
+                _session.force_scale = 0.0
+                apply_force_colors(_session)
+        _redraw()
+        return {"FINISHED"}
+
+
+def is_controller_active():
+    return _session is not None and _session.controller is not None
+
+
+FOLLOW_INTERVAL = 1.0
+_followed_mtime = None
+
+
+def _policy_mtime(scene):
+    try:
+        return os.stat(bpy.path.abspath(scene.biomechanics_posture_policy_path)).st_mtime
+    except OSError:
+        return None
+
+
+def replay_current_policy(context):
+    """Reset the chain to its start pose, reload the policy, and let it play out."""
+    global _session
+    scene = context.scene
+    if _session is None:
+        return
+    path = bpy.path.abspath(scene.biomechanics_posture_policy_path)
+    _session.restore()
+    bpy.context.view_layer.update()
+    was_force = _force_colors
+    _session = ChainSession(scene, None)
+    _session.set_controller(path)
+    if was_force:
+        _session.force_scale = 0.0
+    _session.last_movement = float("inf")
+    # Play exactly the episode the trainer scored, then hold.
+    _session.replay_budget = _session.policy_steps
+    _kick_settle()
+
+
+def _follow_training():
+    """Timer: replay whenever the trainer writes a new best policy."""
+    global _followed_mtime
+    scene = bpy.context.scene
+    if _session is None or _session.controller is None or not scene.biomechanics_follow_training:
+        return None
+    mtime = _policy_mtime(scene)
+    if mtime is not None and mtime != _followed_mtime:
+        _followed_mtime = mtime
+        try:
+            replay_current_policy(bpy.context)
+        except (OSError, ValueError, KeyError) as error:
+            print(f"Follow Training: {error}")
+        _redraw()
+    return FOLLOW_INTERVAL
+
+
+def update_follow_training(scene, _context):
+    global _followed_mtime
+    if scene.biomechanics_follow_training:
+        _followed_mtime = None
+        if not bpy.app.timers.is_registered(_follow_training):
+            bpy.app.timers.register(_follow_training, first_interval=FOLLOW_INTERVAL)
+    elif bpy.app.timers.is_registered(_follow_training):
+        bpy.app.timers.unregister(_follow_training)
+
+
+class BIOMECHANICS_OT_reset_rigid_to_original(bpy.types.Operator):
+    """Move every Rigid bone exactly onto its Original twin (neutral pose)"""
+
+    bl_idname = "biomechanics.reset_rigid_to_original"
+    bl_label = "Reset Rigid to Original"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        scene = context.scene
+        return scene.biomechanics_source_collection is not None and scene.biomechanics_target_collection is not None
+
+    def execute(self, context):
+        from .alignment import mesh_alignment
+
+        scene = context.scene
+        if _session is not None:
+            stop_session(scene)
+        source = scene.biomechanics_source_collection
+        by_base = {base_object_name(obj.name): obj for obj in source.objects if obj.type == "MESH"}
+        moved = 0
+        skipped = 0
+        for obj in scene.biomechanics_target_collection.objects:
+            if obj.type != "MESH":
+                continue
+            twin = by_base.get(base_object_name(obj.name))
+            if twin is None or len(twin.data.vertices) != len(obj.data.vertices):
+                skipped += 1
+                continue
+            try:
+                obj.matrix_world = mesh_alignment(obj, twin) @ obj.matrix_world
+            except ValueError:
+                skipped += 1
+                continue
+            moved += 1
+        _redraw()
+        self.report({"INFO"}, f"Aligned {moved} Rigid bones onto Original" + (f"; skipped {skipped}" if skipped else ""))
+        return {"FINISHED"}
+
+
+class BIOMECHANICS_OT_toggle_posture_controller(bpy.types.Operator):
+    """Toggle the trained posture controller: muscles fire from the chain state every solve"""
+
+    bl_idname = "biomechanics.toggle_posture_controller"
+    bl_label = "Posture Controller"
+
+    @classmethod
+    def poll(cls, _context):
+        return is_active()
+
+    def execute(self, context):
+        scene = context.scene
+        if _session.controller is not None:
+            _session.set_controller(None)
+            _session.set_tone(scene.biomechanics_muscle_tone)
+        else:
+            path = bpy.path.abspath(scene.biomechanics_posture_policy_path)
+            try:
+                _session.set_controller(path)
+            except (OSError, ValueError, KeyError) as error:
+                self.report({"ERROR"}, f"Cannot load posture policy: {error}")
+                return {"CANCELLED"}
+            self.report({"INFO"}, f"Posture controller on (training score {_session.policy_score:.2f})")
+            update_follow_training(scene, context)
+        update_gravity(scene, context)
+        _redraw()
+        return {"FINISHED"}
+
+
+class BIOMECHANICS_OT_export_chain_package(bpy.types.Operator):
+    """Save the active chain (bones, ligaments, muscles, collision fields) for headless training"""
+
+    bl_idname = "biomechanics.export_chain_package"
+    bl_label = "Export Chain Package"
+
+    directory: bpy.props.StringProperty(subtype="DIR_PATH")
+
+    @classmethod
+    def poll(cls, _context):
+        return is_active()
+
+    def invoke(self, context, _event):
+        if not self.directory:
+            self.directory = bpy.path.abspath(context.scene.biomechanics_chain_package_dir)
+        context.window_manager.fileselect_add(self)
+        return {"RUNNING_MODAL"}
+
+    def execute(self, context):
+        try:
+            meta = export_package(context.scene, self.directory)
+        except (ValueError, OSError) as error:
+            self.report({"ERROR"}, str(error))
+            return {"CANCELLED"}
+        context.scene.biomechanics_chain_package_dir = self.directory
+        self.report(
+            {"INFO"},
+            f"Exported {len(meta['bodies'])} bodies, {len(meta['constraint_names'])} constraints, "
+            f"{len(meta['muscle_names'])} muscle strings to {self.directory}",
         )
         return {"FINISHED"}
 
@@ -672,8 +1129,9 @@ class BIOMECHANICS_OT_stop_chain(bpy.types.Operator):
 
 @persistent
 def _reset_on_load(_dummy):
-    global _session
+    global _session, _force_colors
     _session = None
+    _force_colors = False
     if bpy.app.timers.is_registered(_settle):
         bpy.app.timers.unregister(_settle)
 
@@ -696,7 +1154,14 @@ def register_chain():
 
 def unregister_chain():
     global _session
+    if _session is not None:
+        # A reload must not leave the bones wherever the last solve put them.
+        try:
+            _session.restore()
+        except ReferenceError:
+            pass
     _session = None
-    if bpy.app.timers.is_registered(_settle):
-        bpy.app.timers.unregister(_settle)
+    for timer in (_settle, _follow_training):
+        if bpy.app.timers.is_registered(timer):
+            bpy.app.timers.unregister(timer)
     _remove_handlers()

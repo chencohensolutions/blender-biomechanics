@@ -56,10 +56,27 @@ class DistanceConstraintTest(unittest.TestCase):
         fixed = cs.Body("fixed", [0, 0, 0], IDENTITY, fixed=True)
         free = cs.Body("free", [0.02, 0, 0], IDENTITY)
         ligament = cs.DistanceConstraint(fixed, [0, 0, 0], free, [0, 0, 0], 0.02, compliance=1.0, unilateral=True)
-        pull = cs.PoseConstraint(free, [0.03, 0, 0], IDENTITY, position_compliance=1.0, max_position_step=1.0)
-        cs.ChainSolver([fixed, free], [ligament], [], [pull], iterations=10, substeps=30).solve()
-        # Equal compliances: across substeps the body settles halfway between rest and target.
-        self.assertAlmostEqual(ligament.current_length(), 0.025, places=4)
+        pull = cs.PoseConstraint(free, [0.03, 0, 0], IDENTITY, position_compliance=1.0, max_position_step=0.001)
+        cs.ChainSolver([fixed, free], [ligament], [], [pull], iterations=10, substeps=60).solve()
+        # Equal compliances: the body settles about halfway between rest and target
+        # (the ligament multiplier is warm-started, the pose's is not, so not exactly).
+        self.assertGreater(ligament.current_length(), 0.0235)
+        self.assertLess(ligament.current_length(), 0.0265)
+
+
+class StrutTest(unittest.TestCase):
+    def test_compression_only_strut_holds_weight_but_allows_stretch(self):
+        fixed = cs.Body("fixed", [0, 0, 0], IDENTITY, fixed=True)
+        free = cs.Body("free", [0, 0, 0.02], IDENTITY)
+        strut = cs.DistanceConstraint(fixed, [0, 0, 0], free, [0, 0, 0], 0.02, compliance=0.0, mode="compression")
+        solver = cs.ChainSolver([fixed, free], [strut], [], iterations=5, substeps=1, gravity=(0, 0, -0.001))
+        for _solve in range(20):
+            solver.solve()
+        self.assertAlmostEqual(free.position[2], 0.02, places=5)
+        free.position[:] = [0, 0, 0.03]
+        solver.gravity[:] = 0.0
+        solver.solve()
+        self.assertAlmostEqual(free.position[2], 0.03)
 
 
 class GravityTest(unittest.TestCase):
@@ -84,6 +101,29 @@ class GravityTest(unittest.TestCase):
         for _solve in range(20):
             solver.solve()
         self.assertAlmostEqual(free.position[2], 0.02, places=3)
+
+
+class MuscleTest(unittest.TestCase):
+    def test_active_muscle_pulls_free_body_toward_fixed_one(self):
+        fixed = cs.Body("fixed", [0, 0, 0], IDENTITY, fixed=True)
+        free = cs.Body("free", [0.03, 0, 0], IDENTITY)
+        muscle = cs.MuscleElement(fixed, [0, 0, 0], free, [0, 0, 0], group=0, strength=0.001)
+        solver = cs.ChainSolver([fixed, free], [], [], iterations=1, substeps=1, muscles=[muscle])
+        solver.solve()
+        self.assertAlmostEqual(free.position[0], 0.03)  # activation 0: nothing
+        solver.activations[0] = 1.0
+        solver.solve()
+        self.assertAlmostEqual(free.position[0], 0.029, places=6)
+
+    def test_muscle_holds_a_hanging_body_against_gravity(self):
+        fixed = cs.Body("fixed", [0, 0, 0.05], IDENTITY, fixed=True)
+        free = cs.Body("free", [0, 0, 0.0], IDENTITY)
+        muscle = cs.MuscleElement(free, [0, 0, 0], fixed, [0, 0, 0], group=0, strength=0.001)
+        solver = cs.ChainSolver([fixed, free], [], [], iterations=1, substeps=1, gravity=(0, 0, -0.001), muscles=[muscle])
+        solver.activations[0] = 1.0
+        for _solve in range(10):
+            solver.solve()
+        self.assertAlmostEqual(free.position[2], 0.0, places=6)
 
 
 class CollisionTest(unittest.TestCase):

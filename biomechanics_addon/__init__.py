@@ -19,12 +19,17 @@ from .correspondence import (
 )
 from .distance_heatmap import BIOMECHANICS_OT_toggle_distance_heatmap, register_heatmap, unregister_heatmap
 from .interaction import register_interaction, unregister_interaction
+from .atlas_import import BIOMECHANICS_OT_import_atlas_ligaments, BIOMECHANICS_OT_import_atlas_muscles
 from .chain_interaction import (
+    BIOMECHANICS_OT_export_chain_package,
     BIOMECHANICS_OT_precompute_chain_fields,
+    BIOMECHANICS_OT_reset_rigid_to_original,
     BIOMECHANICS_OT_select_chain_target,
     BIOMECHANICS_OT_start_chain,
     BIOMECHANICS_OT_stop_chain,
+    BIOMECHANICS_OT_toggle_force_colors,
     BIOMECHANICS_OT_toggle_move_bones,
+    BIOMECHANICS_OT_toggle_posture_controller,
     register_chain,
     unregister_chain,
 )
@@ -97,10 +102,16 @@ CLASSES = (
     BIOMECHANICS_OT_toggle_muscle_sheets,
     BIOMECHANICS_OT_export_muscle_lengths,
     BIOMECHANICS_OT_precompute_chain_fields,
+    BIOMECHANICS_OT_reset_rigid_to_original,
+    BIOMECHANICS_OT_export_chain_package,
     BIOMECHANICS_OT_select_chain_target,
     BIOMECHANICS_OT_start_chain,
     BIOMECHANICS_OT_stop_chain,
     BIOMECHANICS_OT_toggle_move_bones,
+    BIOMECHANICS_OT_toggle_posture_controller,
+    BIOMECHANICS_OT_toggle_force_colors,
+    BIOMECHANICS_OT_import_atlas_muscles,
+    BIOMECHANICS_OT_import_atlas_ligaments,
     BIOMECHANICS_PT_main_panel,
     BIOMECHANICS_PT_setup_panel,
     BIOMECHANICS_PT_display_panel,

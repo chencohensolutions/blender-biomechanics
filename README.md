@@ -80,7 +80,9 @@ files when diagnosing a run.
 - `biomechanics_addon/muscle_sheets.py`: triangle sheets between a muscle's strings, colored by area change.
 - `biomechanics_addon/ligament_atlas.py`: ligaments and intervertebral discs as strings with stiffness data.
 - `biomechanics_addon/distance_field.py`, `bone_fields.py`: cached signed distance fields per bone for collision.
-- `biomechanics_addon/chain_solver.py`, `chain_interaction.py`: drag a vertebra and the chain follows through ligaments, discs, and bone contact.
+- `biomechanics_addon/chain_solver.py`, `chain_interaction.py`: drag a vertebra and the chain follows through ligaments, discs, bone contact, gravity, and active muscles.
+- `biomechanics_addon/atlas_import.py`: muscles and ligaments from a registered Z-Anatomy atlas (CC BY-SA 4.0).
+- `biomechanics_addon/chain_package.py`, `posture_policy.py`, `tools/train_posture.py`: export the chain and train a muscle posture controller headlessly (`.venv/bin/python tools/train_posture.py --package <dir> --mode policy`).
 - `biomechanics_addon/neural_geometry.py`: evaluated mesh geometry and pose labeling helpers.
 - `biomechanics_addon/neural_training.py`: bpy-free launch, status, and artifact helpers.
 - `biomechanics_addon/operators.py`: user actions and input validation.

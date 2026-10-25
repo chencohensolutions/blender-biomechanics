@@ -39,16 +39,24 @@ GROUPS.update(
         "ligament_pelvis": ("Pelvic ligaments", (0.7, 0.95, 0.6, 1.0)),
         "ligament_hip": ("Hip ligaments", (0.6, 0.9, 0.9, 1.0)),
         "ligament_costal": ("Costovertebral ligaments", (0.95, 0.75, 0.6, 1.0)),
+        "costal_cartilage": ("Costal cartilage", (0.85, 0.9, 0.95, 1.0)),
         "disc_nucleus": ("Disc nucleus", (0.95, 0.4, 0.4, 1.0)),
+        "disc_strut": ("Disc strut", (0.6, 0.1, 0.1, 1.0)),
         "disc_annulus": ("Disc annulus", (0.95, 0.65, 0.5, 1.0)),
+        "disc_fibers": ("Disc oblique fibers", (0.9, 0.5, 0.3, 1.0)),
     }
 )
 
-# Stiffness classes: (compliance, unilateral, slack). XPBD compliance is relative to
+# Stiffness classes: (compliance, unilateral, slack). "disc_strut" is special-cased as a
+# rigid compression-only element (mode "compression") in `_entry`. XPBD compliance is relative to
 # a body inverse mass of about 1: values near 1 stretch readily, near 0.05 are stiff.
 MECHANICS = {
-    "disc_nucleus": (0.1, False, 0.0),
-    "disc_annulus": (0.3, False, 0.0),
+    "disc_nucleus": (0.02, False, 0.0),
+    "disc_strut": (0.0, False, 0.0),
+    # Oblique annulus lamellae: tension-only, no slack; they give the disc its shear
+    # and torsion stiffness (vertical rim springs alone let vertebrae slide sideways).
+    "disc_fibers": (0.05, True, 0.0),
+    "disc_annulus": (0.08, False, 0.0),
     "longitudinal": (0.3, True, 0.02),
     "flavum": (3.0, True, 0.05),
     "interspinous": (2.0, True, 0.04),
@@ -61,6 +69,9 @@ MECHANICS = {
     "pubic": (0.1, True, 0.01),
     "hip_capsule": (0.3, True, 0.03),
     "costal": (0.5, True, 0.02),
+    # Cartilage bars from the bony rib ends to the sternum: stiff and bilateral, so
+    # the sternum rides on the rib cage instead of floating when the spine bends.
+    "cartilage": (0.05, False, 0.0),
 }
 
 
@@ -124,9 +135,15 @@ LIGAMENT_LANDMARKS = {
 }
 
 # Contact-surface landmarks, parameterized by the neighboring bone.
+# The endplate region is every body vertex within this distance of the closest approach
+# to the neighboring vertebra. A wedge-shaped disc varies several mm across the plate, so
+# a tight band would catch only a sliver and the rim points would collapse together.
+ENDPLATE_TOLERANCE_MM = 8.0
+
+
 def endplate(toward, direction=CENTER, bands=None):
     bands = bands or BODY_BANDS
-    return near(direction, bands, toward, 3.0, "centroid" if direction == CENTER else "extreme")
+    return near(direction, bands, toward, ENDPLATE_TOLERANCE_MM, "centroid" if direction == CENTER else "extreme")
 
 
 def facet(toward):
@@ -134,7 +151,9 @@ def facet(toward):
 
 
 def sacral_endplate(direction=CENTER):
-    return near(direction, {"A": (0.4, 1.0), "M": (0.0, 0.4)}, "L5", 3.0, "centroid" if direction == CENTER else "extreme")
+    return near(
+        direction, {"A": (0.4, 1.0), "M": (0.0, 0.4)}, "L5", ENDPLATE_TOLERANCE_MM, "centroid" if direction == CENTER else "extreme"
+    )
 
 
 def auricular(bone, other, part):
@@ -193,6 +212,7 @@ def _entry(key, label, group, mechanics, side, index, count, name, points):
         "compliance": compliance,
         "unilateral": unilateral,
         "slack": slack,
+        "mode": "compression" if mechanics == "disc_strut" else ("tension" if unilateral else "both"),
     }
 
 
@@ -218,19 +238,35 @@ def _segments_with_sacrum():
 def disc_strings():
     entries = []
     for upper, lower, lower_kind in _segments_with_sacrum():
-        lower_bands = {"A": (0.4, 1.0), "M": (0.0, 0.4)} if lower_kind == "sacrum" else BODY_BANDS
-        lower_center = (lower, sacral_endplate()) if lower_kind == "sacrum" else (lower, endplate(upper))
+        if lower_kind == "sacrum":
+            lower_center = (lower, sacral_endplate())
+            lower_rim = sacral_endplate
+        else:
+            lower_center = (lower, endplate(upper))
+            lower_rim = lambda direction: endplate(upper, direction)  # noqa: E731
         key = f"disc_{upper}_{lower}".lower().replace(" ", "_")
         label = f"Disc {upper}-{lower if lower != 'sacrum' else 'S1'}"
         entries += _bundle(
             key + "_nucleus", label + " nucleus", "disc_nucleus", "disc_nucleus", MIDLINE,
             [("center", ((upper, endplate(lower)), lower_center))],
         )
+        # The disc cannot get shorter than its rest height: the column carries load axially.
+        entries += _bundle(
+            key + "_strut", label + " strut", "disc_strut", "disc_strut", MIDLINE,
+            [("center", ((upper, endplate(lower)), lower_center))],
+        )
         ring = []
+        fibers = []
         for index in range(RING_POINTS):
+            # Six distinct extreme points on each endplate: rim i above faces rim i below,
+            # and the oblique fibers join rim i above to rims i +/- 1 below.
             upper_rim = endplate(lower, _ring_direction(index))
-            ring.append((f"rim {index}", ((upper, upper_rim), (lower, nearest_to(upper, upper_rim, lower_bands)))))
+            ring.append((f"rim {index}", ((upper, upper_rim), (lower, lower_rim(_ring_direction(index))))))
+            for step in (-1, 1):
+                neighbor = (index + step) % RING_POINTS
+                fibers.append((f"rim {index} -> {neighbor}", ((upper, upper_rim), (lower, lower_rim(_ring_direction(neighbor))))))
         entries += _bundle(key + "_annulus", label + " annulus", "disc_annulus", "disc_annulus", MIDLINE, ring)
+        entries += _bundle(key + "_fibers", label + " oblique fibers", "disc_fibers", "disc_fibers", MIDLINE, fibers)
     return entries
 
 
@@ -354,6 +390,29 @@ def costal_ligament_strings():
     return entries
 
 
+def costal_cartilage_strings():
+    """Ribs 1-7 to the sternum; ribs 8-10 to the cartilage (bony tip) of the rib above."""
+    entries = []
+    for side in ("L", "R"):
+        sternal = []
+        for level in range(1, 8):
+            rib = _rib(level, side)
+            sternal.append((f"rib {level}", ((rib, "anterior"), ("strenum", nearest_to(rib, "anterior")))))
+        entries += _bundle("costal_cartilage_sternal", "Costal cartilage (sternal)", "costal_cartilage", "cartilage", side, sternal)
+        interchondral = [
+            (f"rib {level}", ((_rib(level, side), "anterior"), (_rib(level - 1, side), nearest_to(_rib(level, side), "anterior"))))
+            for level in range(8, 11)
+        ]
+        entries += _bundle("costal_cartilage_interchondral", "Costal cartilage (interchondral)", "costal_cartilage", "cartilage", side, interchondral)
+    return entries
+
+
 def ligament_strings():
     """Every ligament and disc string, in build order."""
-    return disc_strings() + spinal_ligament_strings() + pelvic_ligament_strings() + costal_ligament_strings()
+    return (
+        disc_strings()
+        + spinal_ligament_strings()
+        + pelvic_ligament_strings()
+        + costal_ligament_strings()
+        + costal_cartilage_strings()
+    )

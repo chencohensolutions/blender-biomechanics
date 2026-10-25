@@ -148,6 +148,18 @@ def _update_muscle_delta_scale(scene, context):
     update_delta_scale(scene, context)
 
 
+def _update_muscle_tone(scene, context):
+    from .chain_interaction import update_tone
+
+    update_tone(scene, context)
+
+
+def _update_follow_training(scene, context):
+    from .chain_interaction import update_follow_training
+
+    update_follow_training(scene, context)
+
+
 def _update_chain_gravity(scene, context):
     from .chain_interaction import update_gravity
 
@@ -191,8 +203,8 @@ def register_properties():
     )
     bpy.types.Scene.biomechanics_chain_base = bpy.props.StringProperty(
         name="Base Bone",
-        description="Fixed bone the chain stands on (sacrum or a vertebra name such as L3)",
-        default="sacrum",
+        description="Fixed support of the chain: 'femurs' (pelvis free, standing on the femoral heads), 'sacrum', or a vertebra name such as L3",
+        default="femurs",
     )
     bpy.types.Scene.biomechanics_chain_top = bpy.props.StringProperty(
         name="Top Bone",
@@ -248,6 +260,41 @@ def register_properties():
         soft_max=3.0,
         precision=2,
         update=_update_chain_gravity,
+    )
+    bpy.types.Scene.biomechanics_muscle_tone = bpy.props.FloatProperty(
+        name="Muscle Tone",
+        description="Uniform activation of every muscle string in the chain (0 = passive)",
+        default=0.0,
+        min=0.0,
+        max=1.0,
+        subtype="FACTOR",
+        update=_update_muscle_tone,
+    )
+    bpy.types.Scene.biomechanics_muscle_strength_mm = bpy.props.FloatProperty(
+        name="Muscle Strength (mm/step)",
+        description="Pull of one fully active muscle string per solver round, in the same units as gravity",
+        default=0.05,
+        min=0.0,
+        soft_max=3.0,
+        precision=2,
+    )
+    bpy.types.Scene.biomechanics_chain_package_dir = bpy.props.StringProperty(
+        name="Chain Package",
+        description="Folder for the exported chain package used by headless posture training",
+        default="//biomechanics_cache/chain_package",
+        subtype="DIR_PATH",
+    )
+    bpy.types.Scene.biomechanics_posture_policy_path = bpy.props.StringProperty(
+        name="Posture Policy",
+        description="Trained posture_policy.npz from tools/train_posture.py",
+        default="//biomechanics_cache/chain_package/posture_policy.npz",
+        subtype="FILE_PATH",
+    )
+    bpy.types.Scene.biomechanics_follow_training = bpy.props.BoolProperty(
+        name="Follow Training",
+        description="While the posture controller is on, replay the trainer's newest best policy on the bones whenever it changes",
+        default=True,
+        update=_update_follow_training,
     )
     bpy.types.Scene.biomechanics_chain_pin_top = bpy.props.BoolProperty(
         name="Pin Top Bone",
@@ -550,6 +597,11 @@ def unregister_properties():
         "biomechanics_chain_gravity",
         "biomechanics_chain_gravity_mm",
         "biomechanics_chain_pin_top",
+        "biomechanics_chain_package_dir",
+        "biomechanics_posture_policy_path",
+        "biomechanics_follow_training",
+        "biomechanics_muscle_tone",
+        "biomechanics_muscle_strength_mm",
         "biomechanics_chain_rest_from_original",
         "biomechanics_chain_target_object",
     ):

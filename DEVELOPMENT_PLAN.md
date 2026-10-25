@@ -254,7 +254,12 @@ handlers, operators).
   error 0.46 mm, 2 k-point query with gradient in ~2 ms. Blender blocks during
   computation (about 3 s per vertebra, 20 s for the sacrum/ilia).
 - **Start Chain Interaction** needs a Rigid vertebra active. Free bodies are the
-  vertebrae above **Base Bone** up to **Top Bone**; the base is fixed. Constraints are
+  vertebrae above **Base Bone** up to **Top Bone**; the base is fixed. **Base Bone**
+  `femurs` (the default) fixes both femurs instead and frees the pelvis: sacrum and
+  both hip bones become bodies with hip, sacroiliac, and pubic-symphysis contact
+  pairs, so the whole trunk stands on the femoral heads (22 bodies, 540 constraints,
+  449 muscle strings in 86 groups, 22 pairs, ~120 ms per solve). Passively at
+  gravity 0.3 the pelvis tips on the hips (sacrum -12 mm after 60 solves). Constraints are
   every ligament/disc string whose bones are all in the chain, with rest lengths from
   the pose at start (**Rest Lengths from Original** switches to Original lengths,
   which makes the Rigid pose drift toward the Original equilibrium). Adjacent bones
@@ -296,12 +301,99 @@ handlers, operators).
   muscle tone does. With the defaults the mid-thoracic spine sags about 4 mm
   (ligament slack plus disc give) and settles in about 50 solves (under 5 s); lumbar
   bones move under 1 mm, and dragging L3 20 mm forward still moves it 15 mm.
+- Solver details that matter: unilateral multipliers are clamped (tension <= 0,
+  compression >= 0) rather than reset when slack, and multipliers are warm-started
+  across solves (full memory), so a steady load is met by the forces that balanced it
+  last round. Within a pair batch each constraint's XPBD step is divided by the
+  number of constraints moving the body and that divided value is accumulated as the
+  multiplier, so it equals the force actually applied; plain averaging made a
+  compliant spring act n times softer. A straight 12-body test stack now holds 0.4
+  mm under 0.3 mm/step gravity; a leaning stack still buckles, which is physical (a
+  ligamentous spine without muscles buckles under ~90 N).
+- **Discs** are a stiff nucleus spring, a rigid compression-only center strut (the
+  column carries load axially), six rim springs, and twelve oblique tension-only
+  annulus fibers (rim i to rim i +/- 1), which give shear and torsion stiffness.
+- **Muscles** are active elements: every muscle string of the Rigid muscles
+  collection whose ends map to chain bodies becomes a `MuscleElement`; rib
+  attachments ride on their vertebra, and ilium/femur/sternum attachments pull against
+  fixed anchor bodies. Each solver round a string pulls its ends together by
+  `activation * Muscle Strength` (default 0.05 mm/step per string, forces add up,
+  never averaged). Activations are per (muscle, side) group (56 groups, 405 strings
+  for the sacrum-T01 chain). **Muscle Tone** sets them uniformly; uniform tone or
+  "all extensors" does not hold the spine up (co-contraction compresses, extension on
+  a kyphotic thoracic spine tips the rib cage back), so posture is a control problem.
+- **Export Chain Package** writes `chain.json` + `chain.npz` (bodies, constraints,
+  muscles, pair samples and margins, field file paths) that `chain_package.build_solver`
+  turns back into a ChainSolver without bpy. Headless reproduction is exact (T01
+  -22.5 mm after 40 passive solves both in Blender and headless, ~70 ms per solve).
+- `tools/train_posture.py` optimizes a controller against the package with an
+  antithetic evolution strategy over worker processes: `--mode static` (one
+  activation vector) or `--mode policy` (tanh network on the observation: per free
+  body, offset from rest in cm and rotation vector). Score = top-bone height gain (cm)
+  - 0.3 drift - 0.2 strain - penetration over 1 mm - effort. Writes
+  `posture_policy.npz`; `posture_policy.py` (bpy-free) holds observation, network,
+  and save/load shared with Blender.
+- **Posture Controller** toggle (needs an active session) loads the policy file and
+  sets activations from the live chain state before every solve; Muscle Tone is
+  disabled while it is on. The panel shows mean activation, policy generation, and
+  score. **Follow Training** (default on) polls the policy file every second and,
+  when the trainer has written a newer best (it saves atomically after every
+  generation), restores the chain to its start pose, rebuilds the session with the
+  new controller, and lets it play out, so training can be watched live on the bones.
+- **Force Colors** toggle tints every muscle string red by its activation and every
+  ligament/disc string blue by the force it carries (|multiplier|, scaled to a slowly
+  decaying running maximum), refreshed after each solve (about +90 ms per solve for
+  ~900 strings). Off, stop, and file load restore the group colors or the length-change
+  colors. **Reset Rigid to Original** aligns every Rigid bone exactly onto its
+  Original twin (per-bone Kabsch fit), which is the neutral pose.
+- Training setup notes: from the neutral pose the passive chain holds at gravity 0.15
+  (T01 -0.4 mm after 80 solves), sags 5.5 mm at 0.3 and 16.5 mm at 0.5, and the solver
+  diverges at 0.8. Every hand-set activation pattern lowers T01 (muscles mostly
+  compress a curved column), so the trainer uses `--perturb-mm/--perturb-deg`
+  (random pushes of three bodies at episode start, averaged over `--episodes`) and
+  the policy must recover height. The displaced Rigid pose that the file was saved
+  with was far less stable than the neutral pose; most of the collapse chased earlier
+  came from that pose plus the solver issues above.
 - The solver is deterministic and bpy-free, intended as the ground truth for a later
   learned surrogate (option 4): record (target pose, start pose, gravity) -> solved pose.
 - Settle loop: `SETTLE_THRESHOLD` 0.03 mm of maximum body movement per solve, at most
   `MAX_SETTLE_SOLVES` (150) per kick, 30 ms apart. Each solve blocks the UI for its
   duration, so settling is visibly choppy; the neural surrogate is the planned fix.
 
+
+### Atlas Completion (scene data, not add-on code)
+
+The scan contains T01-L5, ribs, sternum, sacrum, hip bones, and proximal femurs.
+The rest of the skeleton was added from **Z-Anatomy** (`SkeletalSystem100.fbx`,
+GitHub LluisV/Z-Anatomy, PC-Version branch), licensed **CC BY-SA 4.0**: derived
+bones in this scene carry a `biomechanics_atlas_source` custom property naming the
+atlas parts, and any distribution of the scene must keep the attribution and the
+share-alike terms. Procedure (ad hoc scripts in this session, not yet an operator):
+
+1. Import the FBX into an `atlas` collection (2,926 objects; the real bones are the
+   ones without landmark/attachment suffixes `.i .j .el .er .ol .or`).
+2. Similarity fit (Umeyama, scale 0.943) from atlas to scan bone centroids over
+   T1-T12, L1-L5, sacrum, both hip bones: RMS 10.5 mm, max 17.9 mm.
+3. Femurs: rigid ICP of each atlas femur onto the scan's proximal femur using the
+   cached distance field (projection to surface, 40 iterations): 1.9 / 2.1 mm RMS on
+   the overlap. The extended femur = scan vertices + atlas vertices below the scan
+   cut (z of the scan's lowest femur vertex + 4 mm), joined into one mesh named
+   `femur L` / `femur R` (and `.002` twins); the scan-only meshes are kept hidden as
+   `femur L partial` etc. Fields and strings must be rebuilt for the new meshes.
+4. Patella, tibia, fibula, and foot (27 bones joined) follow each femur's ICP
+   transform. Head and neck (skull: 58 atlas parts joined; mandible; hyoid; C1-C7)
+   follow the global fit shifted so the C7-T01 gap is 5 mm. Clavicles, scapulae,
+   humeri, radii, ulnae, hands (27 bones joined), and costal cartilages 1-10 use the
+   global fit. Every new bone exists in both Original and Rigid with identical
+   geometry. The `atlas` collection is left hidden in the scene and can be deleted.
+5. The scan's sternum is re-seated by rigid ICP onto the registered atlas sternum
+   (manubrium + body + xiphoid), so it sits where the costal cartilages end.
+
+Not done: per-region refinement of the shoulder girdle and the neck beyond the
+C7 offset, cervical discs/ligaments, and strings for the new bones. The muscle and
+ligament atlases were rebuilt after the femur replacement (610 ligament strings).
+
+## Core Functions
 
 ### `alignment.base_object_name(name)`
 
@@ -382,6 +474,10 @@ order and unregister them in reverse order, preserving Blender add-on convention
 - `biomechanics_addon/chain_solver.py`: bpy-free batched XPBD rigid chain solver.
 - `biomechanics_addon/chain_interaction.py`: chain session, target Empty, handlers,
    and operators.
+- `biomechanics_addon/chain_package.py`: bpy-free chain package save/load/rebuild.
+- `biomechanics_addon/posture_policy.py`: bpy-free posture observation, controllers,
+   and policy file I/O.
+- `tools/train_posture.py`: headless posture optimization (evolution strategy).
 - `biomechanics_addon/distance_heatmap.py`: temporary per-vertex distance heatmap and
    viewport legend.
 - `biomechanics_addon/dataset_io.py`: bpy-free chunked NPZ dataset serialization.
@@ -539,36 +635,52 @@ Run after changing alignment, properties, UI, or registration:
 
 ## Next Session
 
-The external neural feature is implemented through Phase 4 steps 12-16, pending the
-runtime acceptance checks above. Continue in this order:
+State at handoff (2026-10-25):
 
-1. Fix the live-solve performance boundary. `_neural_constrained_matrix()` currently
-   calls `load_and_check_model()` on every dependency-graph update; that recomputes
-   full geometry fingerprints before each prediction. Cache the validated manifest,
-   ONNX path/session, compatibility result, and last accepted pose when the model is
-   imported or first used. Invalidate that cache on model change, clear, unregister,
-   and relevant fixed/moving-object changes. Keep per-update work to transform
-   conversion, ONNX inference, and projection.
-2. Add focused tests for cache invalidation and conservative projection across a
-   disconnected valid region, then run the host suite and `compileall`.
-3. Run the remaining Phase 4 live checks listed above. Record model disagreements;
-   fix calibration/data rather than special-casing individual poses.
-4. Exercise the one-click workflow live with the real sacrum/L5 package: verify
-   duplicate-launch prevention, timer status updates, resume after interruption,
-   exact nonzero exit propagation, and that a failed run preserves the active model.
-5. Update `tools/install_blender_onnxruntime.ps1`: its `onnxruntime==1.20.1` pin has
-   no Python 3.13 wheel. Blender 5.2/Python 3.13 was live-tested successfully with
-   `onnxruntime==1.28.0`. Also account for Microsoft Store Blender, whose protected
-   embedded `python.exe` cannot be launched directly from PowerShell.
+- Scene: the live Blender file `rig40-osx.blend` (Google Drive `spine/`) is UNSAVED;
+  a copy with everything below is saved as `spine/rig40-osx-complete-skeleton.blend`.
+  Atlas sources are kept in `spine/zanatomy/SkeletalSystem100.fbx` and `Joints100.fbx`
+  (Z-Anatomy, CC BY-SA 4.0; attribution required for any distribution).
+- Rigid pose = Original pose (Reset Rigid to Original). Base Bone `femurs`, gravity 0.3,
+  muscle strength 0.1, Pin Top off. No chain session, no training running.
+- Skeleton completed from the atlas (see Atlas Completion): skull, mandible, hyoid,
+  C1-C7, clavicles, scapulae, arms, hands, costal cartilages, extended femurs,
+  patellae, tibiae, fibulae, feet, in both collections. Scan sternum re-seated by ICP
+  onto the atlas sternum (moved 6 mm, 11 deg). `atlas` and `atlas joints` collections
+  (imported FBX, registered) are hidden in the scene and can be deleted.
+- Strings: built-in muscles (441) + 127 atlas muscles; built-in ligaments/discs (610,
+  incl. costal cartilage) + 104 atlas ligaments, per collection. **Import Atlas
+  Muscles / Ligaments** (`atlas_import.py`) snap Z-Anatomy attachment areas to the
+  nearest scene-bone vertices; they skip muscles already modeled by name and any
+  string whose ends land on one object. Hands and feet are single joined meshes, so
+  their intrinsic muscles are skipped (66) and so are ligaments within them (most of
+  the 234 skipped). Re-run the imports after Build Muscle Strings / Ligaments, which
+  recreate the collections. The per-region transforms the import needs
+  (`femur_fit`, `neck_offset`) live in `bpy.app.driver_namespace` and are lost on
+  Blender restart; the atlas collections are already transformed by the global fit,
+  so only leg (femur ICP) and neck (11.5 mm z) extras matter.
+- Chain: the exported package (`biomechanics_cache/chain_package`) predates the
+  femur replacement and the atlas strings; re-export before training. New femur
+  meshes need their distance fields recomputed (Precompute Collision Fields).
+- Training: `tools/train_posture.py` policy mode with `--perturb-mm 8 --perturb-deg 4`
+  reached best -0.43 vs passive -2.09 at gravity 0.3 (femur base, before the sternum
+  body) in ~16 generations; the user stopped training. Live view: Move Bones +
+  Posture Controller + Follow Training + Force Colors.
 
-The Phase 4 work is not committed. At handoff, the working tree includes changes to
-`biomechanics_addon/__init__.py`, `interaction.py`, `neural_constraints.py`,
-`operators.py`, and `panels.py`, plus new `tests/test_neural_constraints.py` and an
-unrelated modified `.vscode/settings.json`. Do not reset or clean these files.
+Next steps, in order:
 
-After the neural milestone is complete, return to the deferred pelvic work: coupled
-SI limits over sacrum/both ilia, pubic-symphysis spring response, and opposite-ilium
-movement. The comparison-display rename and pairing diagnostics also remain deferred.
+1. Split hands and feet into their bones (keep atlas names) so intrinsic muscles and
+   ligaments import; or accept them as rigid blocks.
+2. Rebuild strings, precompute fields for the new femurs, re-export the package,
+   retrain (`--mode policy --gravity 0.3 --perturb-mm 8 --perturb-deg 4 --episodes 1
+   --population 16 --steps 40`), and watch with Follow Training.
+3. Make the registration an operator (import FBX, Umeyama fit, femur ICP, neck
+   offset, bone placement) instead of session scripts, and persist the per-region
+   transforms on the objects.
+4. Cervical discs/ligaments in `ligament_atlas.py` (C1-C7 now exist) and a
+   `biomechanics_chain_top` above T01 so the neck and head join the chain.
+5. Earlier deferred items remain: neural-pipeline Phase 4 checks, pelvic coupling,
+   comparison-display rename.
 
 ## Known Constraints
 
