@@ -374,10 +374,16 @@ class ChainSolver:
         self.m_group = np.array([m.group for m in self.muscles], dtype=np.int64)
         self.m_strength = np.array([m.strength for m in self.muscles])
         groups = {}
+        joints = []
         for index, (a, b) in enumerate(zip(self.c_a, self.c_b)):
-            groups.setdefault((min(a, b), max(a, b)), []).append(index)
-        # Ordered along the chain so a sweep propagates from the base outward.
+            if self.c_mode[index] == 0 and self.c_rest[index] == 0.0:
+                joints.append(index)  # zero-length link: a ball joint, projected alone
+            else:
+                groups.setdefault((min(a, b), max(a, b)), []).append(index)
+        # Ordered along the chain so a sweep propagates from the base outward; joints last
+        # and on their own so nothing in the batch dilutes them.
         self.c_groups = [np.array(groups[key], dtype=np.int64) for key in sorted(groups)]
+        self.c_groups += [np.array([index], dtype=np.int64) for index in joints]
         self._sweep = 0
 
     def _state(self):

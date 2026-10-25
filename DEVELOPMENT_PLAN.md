@@ -258,14 +258,27 @@ handlers, operators).
   `femurs` (the default) fixes both femurs instead and frees the pelvis: sacrum and
   both hip bones become bodies with hip, sacroiliac, and pubic-symphysis contact
   pairs, so the whole trunk stands on the femoral heads (22 bodies, 540 constraints,
-  449 muscle strings in 86 groups, 22 pairs, ~120 ms per solve). Passively at
-  gravity 0.3 the pelvis tips on the hips (sacrum -12 mm after 60 solves). Constraints are
+  449 muscle strings in 86 groups, ~120 ms per solve). The pelvis is held together
+  and on the femurs by near-rigid zero-length ball joints (compliance 1e-4,
+  projected alone after the pair groups): hips at femoral head centers fitted by a
+  least-squares sphere to the femur vertices within 6 mm of the acetabulum (radius
+  ~22 mm), sacroiliac joints at the interosseous ligament centers, and the pubic
+  symphysis at its ligament center; the hip, SI, and pubic contact pairs are dropped
+  because contacts fight the joints. Fully rigid joints oscillate at 5 sweeps. Even
+  so the trunk's weight sinks the pelvis through the hips (sacrum -42 mm with rigid
+  hips alone, -72 mm over 150 solves with all joints), so **Pelvis Hold** (default
+  0.005) is a soft 6-DOF pose constraint on the sacrum standing in for the hip and
+  balance muscles: with it the sacrum stays within 0.1 mm and 0.4 deg over 150
+  solves while the spine above still sags (T01 -57 mm), which is the controller's job.
+  The hold is exported in the chain package (`holds`) so training sees it too. Constraints are
   every ligament/disc string whose bones are all in the chain, with rest lengths from
   the pose at start (**Rest Lengths from Original** switches to Original lengths,
   which makes the Rigid pose drift toward the Original equilibrium). Adjacent bones
   form collision pairs with 1,200 surface samples each; a pair's margin is capped
-  at its rest clearance so touching bones are not pushed apart at start. Ribs follow
-  their vertebra rigidly when **Ribs Follow** is on.
+  at its rest clearance so touching bones are not pushed apart at start. Non-chain bones follow
+  rigidly when **Attached Bones Follow** is on: ribs and costal cartilages their
+  vertebra, skull/mandible/hyoid/C1-C7 T01, clavicles the sternum, scapulae/arms/hands
+  T04; bones on the fixed femurs stay.
 - **Move Bones** (`biomechanics.toggle_move_bones`) is the primary control: a free
   session with no handle. The depsgraph handler compares every chain bone in the
   update set with the matrix the solver last wrote (`ChainSession.written`); a bone

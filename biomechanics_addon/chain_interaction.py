@@ -20,7 +20,7 @@ import numpy as np
 from bpy.app.handlers import persistent  # pyright: ignore[reportMissingImports]
 from mathutils import Matrix  # pyright: ignore[reportMissingImports]
 
-from .alignment import base_object_name, local_vertices
+from .alignment import base_object_name, local_vertices, world_vertices
 from .bone_fields import field_for_object, field_path, has_cached_field, surface_samples
 from .chain_package import package_from_session, save_package
 from .posture_policy import ChainState, controller_from_policy, load_policy
@@ -45,6 +45,9 @@ from .muscle_strings import (
 )
 
 FEMUR_BASE = "femurs"
+# Ball joints are zero-length links with a whisper of compliance: fully rigid ones
+# oscillate against the ligaments at the solver's sweep budget.
+JOINT_COMPLIANCE = 1e-4
 FEMURS = ("femur L", "femur R")
 PELVIS = ("ilium L", "ilium R", "sacrum")
 STERNUM = "strenum"
@@ -99,6 +102,8 @@ class ChainSession:
         self._build(scene, handle)
 
     def _build(self, scene, handle):
+        # Matrices assigned by a previous restore or reset are only reliable after evaluation.
+        bpy.context.view_layer.update()
         rigid = scene.biomechanics_target_collection
         by_base = {}
         for obj in rigid.objects:
@@ -147,24 +152,37 @@ class ChainSession:
         self.bodies = bones
 
         constraints = self._ligament_constraints(scene, by_base)
+        if pelvis_free:
+            constraints += self._pelvic_joints(scene, by_base)
         muscles = self._muscle_elements(scene, by_base, chain)
         pairs = []
         margin = scene.biomechanics_chain_margin_mm / _units(scene)
         contacts = list(zip(["sacrum" if pelvis_free else base] + chain, chain))
-        if pelvis_free:
-            # Hip joints, sacroiliac joints, and the pubic symphysis.
-            contacts = [
-                ("femur L", "ilium L"), ("femur R", "ilium R"),
-                ("ilium L", "sacrum"), ("ilium R", "sacrum"), ("ilium L", "ilium R"),
-            ] + contacts
+        # With the pelvis free, hips, sacroiliac joints, and the symphysis are ball joints
+        # (see _pelvic_joints); bone contacts there would only fight them.
         for lower, upper in contacts:
             pairs.append(self._collision_pair(scene, by_base, lower, upper, margin))
 
+        self.holds = []
+        if pelvis_free and scene.biomechanics_chain_pelvis_hold > 0.0 and "sacrum" in bones:
+            # Stand-in for the hip and balance muscles: the pelvis keeps its place and
+            # tilt unless pushed (the trunk's weight otherwise sinks it through the hips).
+            sacrum = bones["sacrum"]
+            self.holds.append(
+                PoseConstraint(
+                    sacrum,
+                    sacrum.position.copy(),
+                    sacrum.quaternion.copy(),
+                    position_compliance=scene.biomechanics_chain_pelvis_hold,
+                    rotation_compliance=scene.biomechanics_chain_pelvis_hold,
+                    max_position_step=0.001,
+                )
+            )
         self.solver = ChainSolver(
             list(bones.values()) + list(self.anchors.values()),
             constraints,
             pairs,
-            [],
+            list(self.holds),
             iterations=scene.biomechanics_chain_iterations,
             substeps=scene.biomechanics_chain_substeps,
             gravity=_gravity_vector(scene),
@@ -195,7 +213,7 @@ class ChainSession:
             position_compliance=scene.biomechanics_chain_handle_compliance,
             rotation_compliance=scene.biomechanics_chain_handle_compliance,
         )
-        self.solver.pose_constraints = [self.pose]
+        self.solver.pose_constraints = [self.pose] + list(self.holds)
         self.solver._build_arrays()
 
     def grabbed_bone(self, updated_objects):
@@ -261,6 +279,77 @@ class ChainSession:
                     )
                 )
         return constraints
+
+    def _pelvic_joints(self, scene, by_base):
+        """Near-rigid zero-length links: hips at the fitted femoral head centers, sacroiliac
+        joints at the interosseous ligament centers, pubic symphysis at its ligament center."""
+        joints = self._hip_joints(scene, by_base)
+        body = self.bodies
+        centers = self._string_centers(scene)
+        for side in ("L", "R"):
+            center = centers.get(("Interosseous sacroiliac ligament", side))
+            if center is not None and "sacrum" in body and f"ilium {side}" in body:
+                a, b = body["sacrum"], body[f"ilium {side}"]
+                joints.append(DistanceConstraint(a, a.local_point(center), b, b.local_point(center), 0.0, compliance=JOINT_COMPLIANCE, name=f"si joint {side}", mode="both"))
+        center = centers.get(("Pubic symphysis ligaments", "M"))
+        if center is not None and "ilium L" in body and "ilium R" in body:
+            a, b = body["ilium L"], body["ilium R"]
+            joints.append(DistanceConstraint(a, a.local_point(center), b, b.local_point(center), 0.0, compliance=JOINT_COMPLIANCE, name="pubic joint", mode="both"))
+        return joints
+
+    def _string_centers(self, scene):
+        """Mean world point of all attachments of each Rigid ligament label, by (label, side)."""
+        centers = {}
+        collection = muscle_collections(scene, "ligament").get(scene.biomechanics_target_collection.name)
+        if collection is None:
+            return centers
+        groups = {}
+        for obj in collection.objects:
+            info = string_info(obj)
+            if info is None:
+                continue
+            for bone, index in info["attachments"]:
+                point = _world_vertex(bone, index)
+                if point is not None:
+                    groups.setdefault((info["label"], info["side"]), []).append(point)
+        for key, points in groups.items():
+            centers[key] = np.mean(points, axis=0)
+        return centers
+
+    def _hip_joints(self, scene, by_base):
+        """Near-rigid zero-length links at the femoral head centers: ball joints that keep
+        the pelvis seated on the femurs while leaving rotation free."""
+        joints = []
+        for side in ("L", "R"):
+            femur, ilium = by_base.get(f"femur {side}"), by_base.get(f"ilium {side}")
+            if femur is None or ilium is None or f"ilium {side}" not in self.bodies:
+                continue
+            field = field_for_object(ilium, scene)
+            femur_world = world_vertices(femur)
+            local_in_ilium = (femur_world - np.array(ilium.matrix_world.translation)) @ np.array(ilium.matrix_world.to_3x3())
+            distances = field.sample(local_in_ilium)
+            articular = femur_world[np.abs(distances) < 0.006]
+            if len(articular) < 50:
+                print(f"Biomechanics: hip {side}: only {len(articular)} articular vertices, no ball joint")
+                continue
+            center, radius = _fit_sphere(articular)
+            femur_body = self.bodies[f"femur {side}"]
+            ilium_body = self.bodies[f"ilium {side}"]
+            joints.append(
+                DistanceConstraint(
+                    ilium_body,
+                    ilium_body.local_point(center),
+                    femur_body,
+                    femur_body.local_point(center),
+                    0.0,
+                    compliance=JOINT_COMPLIANCE,
+                    name=f"hip joint {side}",
+                    mode="both",
+                )
+            )
+            self.hip_radius_mm = getattr(self, "hip_radius_mm", {})
+            self.hip_radius_mm[side] = radius * _units(scene)
+        return joints
 
     def _anchor_body(self, obj):
         """A fixed body for a bone outside the chain that muscles pull against."""
@@ -369,20 +458,36 @@ class ChainSession:
         pair.margin = min(margin, max(rest_clearance - 1e-5, -1.0))
         return pair
 
+    def _follower_leader(self, base, chain):
+        """Which chain body a non-chain bone rides on, or None to leave it where it is."""
+        if " rib " in f" {base} " or " cartilage " in f" {base} ":
+            vertebra = base.split(" ")[0]
+            return vertebra if vertebra in chain else None
+        head_neck = base in ("skull", "mandible", "hyoid") or (len(base) == 2 and base[0] == "C" and base[1].isdigit())
+        if head_neck:
+            return "T01" if "T01" in chain else None
+        if base.startswith("clavicle"):
+            return STERNUM if STERNUM in self.bodies else ("T01" if "T01" in chain else None)
+        if base.split(" ")[0] in ("scapula", "humerus", "radius", "ulna", "hand"):
+            for level in ("T04", "T03", "T02", "T01"):
+                if level in chain:
+                    return level
+        return None
+
     def _collect_followers(self, scene, rigid, chain):
         if not scene.biomechanics_chain_move_ribs:
             return
         for obj in rigid.objects:
-            if obj.type != "MESH":
+            if obj.type != "MESH" or obj.hide_get():
                 continue
             base = base_object_name(obj.name)
-            if " rib " not in f" {base} ":
+            if base in self.bodies or base in self.anchors:
                 continue
-            vertebra = base.split(" rib ")[0]
-            if vertebra not in chain or vertebra not in self.objects:
+            leader_name = self._follower_leader(base, chain)
+            if leader_name is None or leader_name not in self.objects:
                 continue
-            leader = bpy.data.objects[self.objects[vertebra]]
-            self.followers.append((obj.name, vertebra, leader.matrix_world.inverted() @ obj.matrix_world))
+            leader = bpy.data.objects[self.objects[leader_name]]
+            self.followers.append((obj.name, leader_name, leader.matrix_world.inverted() @ obj.matrix_world))
             self.start_matrices[obj.name] = obj.matrix_world.copy()
 
     def set_target(self, target_matrix):
@@ -424,11 +529,13 @@ class ChainSession:
                 matrix[row][3] = float(translation[row])
             obj.matrix_world = matrix
             self.written[obj.name] = matrix.copy()
-        for follower_name, vertebra, relative in self.followers:
+        for follower_name, leader_name, relative in self.followers:
             follower = bpy.data.objects.get(follower_name)
-            leader = bpy.data.objects.get(self.objects[vertebra])
-            if follower is not None and leader is not None:
-                follower.matrix_world = leader.matrix_world @ relative
+            # Use the matrix just written: a bone-parented leader's matrix_world reads
+            # stale until the depsgraph re-evaluates.
+            leader_matrix = self.written.get(self.objects[leader_name])
+            if follower is not None and leader_matrix is not None:
+                follower.matrix_world = leader_matrix @ relative
         self.last_solve_ms = (time.perf_counter() - started) * 1000.0
 
     def _runaway(self, limit=0.5):
@@ -474,6 +581,17 @@ class _CenteredField:
 
     def sample_with_gradient(self, points):
         return self.field.sample_with_gradient(np.asarray(points) + self.center)
+
+
+def _fit_sphere(points):
+    """Least-squares sphere through points: returns (center, radius)."""
+    points = np.asarray(points, dtype=np.float64)
+    a = np.hstack((2.0 * points, np.ones((len(points), 1))))
+    b = (points ** 2).sum(axis=1)
+    solution, _residuals, _rank, _sv = np.linalg.lstsq(a, b, rcond=None)
+    center = solution[:3]
+    radius = float(np.sqrt(solution[3] + center @ center))
+    return center, radius
 
 
 def _relative(obj_from, obj_to):
@@ -557,6 +675,7 @@ def start_session(context, handle):
     scene.collection.objects.link(target)
     target.matrix_world = handle.matrix_world.copy()
     scene.biomechanics_chain_target_object = target
+    _hide_original_strings(scene)
     for obj in context.view_layer.objects:
         obj.select_set(False)
     target.select_set(True)
@@ -574,6 +693,7 @@ def stop_session(scene, restore=False):
     if _session is not None and _force_colors:
         _restore_force_colors(_session)
     _session = None
+    _show_original_strings()
     if bpy.app.timers.is_registered(_settle):
         bpy.app.timers.unregister(_settle)
     target = _target_object(scene)
@@ -703,12 +823,55 @@ def update_gravity(scene, _context):
         bpy.app.timers.register(_settle, first_interval=SETTLE_INTERVAL)
 
 
+_hidden_original_strings = []
+
+
+def _hide_original_strings(scene):
+    """Original strings never move; hide them so they are not mistaken for stuck fibers."""
+    global _hidden_original_strings
+    source = scene.biomechanics_source_collection
+    if source is None or not scene.biomechanics_chain_hide_original_strings:
+        return
+    for _bones, _kind, collection in string_collections_of(scene, source.name):
+        layer = _layer_collection(bpy.context.view_layer.layer_collection, collection)
+        if layer is not None and not layer.hide_viewport:
+            layer.hide_viewport = True
+            _hidden_original_strings.append(collection.name)
+
+
+def _show_original_strings():
+    global _hidden_original_strings
+    for name in _hidden_original_strings:
+        collection = bpy.data.collections.get(name)
+        layer = _layer_collection(bpy.context.view_layer.layer_collection, collection) if collection else None
+        if layer is not None:
+            layer.hide_viewport = False
+    _hidden_original_strings = []
+
+
+def _layer_collection(layer_collection, collection):
+    if layer_collection.collection == collection:
+        return layer_collection
+    for child in layer_collection.children:
+        found = _layer_collection(child, collection)
+        if found is not None:
+            return found
+    return None
+
+
+def string_collections_of(scene, bones_name):
+    from .muscle_strings import string_collections
+
+    return [(bones, kind, collection) for bones, kind, collection in string_collections(scene) if bones == bones_name]
+
+
 def start_free_mode(context):
     """Grab-any-bone mode: no target Empty; the moved vertebra drives the chain."""
     global _session
     scene = context.scene
     stop_session(scene)
     _session = ChainSession(scene, None)
+    _hide_original_strings(scene)
     _session.last_movement = float("inf")
     _kick_settle()
     return _session

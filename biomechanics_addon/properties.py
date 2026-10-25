@@ -296,14 +296,27 @@ def register_properties():
         default=True,
         update=_update_follow_training,
     )
+    bpy.types.Scene.biomechanics_chain_hide_original_strings = bpy.props.BoolProperty(
+        name="Hide Original Strings",
+        description="While a chain runs, hide the Original collection's strings, which never move",
+        default=True,
+    )
+    bpy.types.Scene.biomechanics_chain_pelvis_hold = bpy.props.FloatProperty(
+        name="Pelvis Hold",
+        description="With the femurs as base, a soft hold on the sacrum's position and tilt standing in for hip and balance muscles (0 = off; lower is firmer)",
+        default=0.005,
+        min=0.0,
+        soft_max=2.0,
+        precision=3,
+    )
     bpy.types.Scene.biomechanics_chain_pin_top = bpy.props.BoolProperty(
         name="Pin Top Bone",
         description="Keep the top bone fixed so the chain hangs between base and top instead of drooping",
         default=True,
     )
     bpy.types.Scene.biomechanics_chain_move_ribs = bpy.props.BoolProperty(
-        name="Ribs Follow",
-        description="Ribs move rigidly with their vertebra",
+        name="Attached Bones Follow",
+        description="Ribs, cartilages, head, neck, shoulder girdle, and arms move rigidly with the chain bone they attach to",
         default=True,
     )
     bpy.types.Scene.biomechanics_chain_target_object = bpy.props.PointerProperty(
@@ -597,6 +610,8 @@ def unregister_properties():
         "biomechanics_chain_gravity",
         "biomechanics_chain_gravity_mm",
         "biomechanics_chain_pin_top",
+        "biomechanics_chain_pelvis_hold",
+        "biomechanics_chain_hide_original_strings",
         "biomechanics_chain_package_dir",
         "biomechanics_posture_policy_path",
         "biomechanics_follow_training",

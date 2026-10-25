@@ -12,7 +12,7 @@ import os
 
 import numpy as np
 
-from .chain_solver import Body, ChainSolver, CollisionPair, DistanceConstraint, MuscleElement
+from .chain_solver import Body, ChainSolver, CollisionPair, DistanceConstraint, MuscleElement, PoseConstraint
 from .distance_field import DistanceField
 
 PACKAGE_JSON = "chain.json"
@@ -119,11 +119,24 @@ def build_solver(meta, arrays, field_cache=None, iterations=None, substeps=None,
             )
         )
 
+    holds = []
+    for hold in meta.get("holds", []):
+        body = bodies[int(hold["body"])]
+        holds.append(
+            PoseConstraint(
+                body,
+                body.position.copy(),
+                body.quaternion.copy(),
+                position_compliance=float(hold.get("position_compliance", 1e6)),
+                rotation_compliance=float(hold["rotation_compliance"]),
+                max_position_step=0.001,
+            )
+        )
     solver = ChainSolver(
         bodies,
         constraints,
         pairs,
-        [],
+        holds,
         iterations=meta["iterations"] if iterations is None else iterations,
         substeps=meta["substeps"] if substeps is None else substeps,
         gravity=meta["gravity"] if gravity is None else gravity,
@@ -152,6 +165,10 @@ def package_from_session(session, scene_settings):
         "muscle_groups": [list(key) for key in session.muscle_groups],
         "muscle_group_labels": scene_settings.get("group_labels", []),
         "field_paths": {str(index_of[name]): path for name, path in scene_settings["field_paths"].items()},
+        "holds": [
+            {"body": index_of[hold.body.name], "rotation_compliance": hold.rotation_compliance, "position_compliance": hold.position_compliance}
+            for hold in getattr(session, "holds", [])
+        ],
     }
     arrays = {
         "body_position": np.array([body.position for body in bodies]),
