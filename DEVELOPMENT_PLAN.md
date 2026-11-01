@@ -440,6 +440,297 @@ Not done: per-region refinement of the shoulder girdle and the neck beyond the
 C7 offset, cervical discs/ligaments, and strings for the new bones. The muscle and
 ligament atlases were rebuilt after the femur replacement (610 ligament strings).
 
+### CT Bone Extraction (tools/ct, not add-on code)
+
+`tools/ct/` (repo `.venv`, Python 3.13; usage in README) rebuilds bone meshes from a
+CT scan. Bone surfaces now come from `segment_nni.py` (learned promptable
+segmentation with nnInteractive v1.0 on isotropic crops that `fuse_series.py` fuses
+from the axial, coronal and sagittal series of each acquisition). The
+previous method (`fuse_planes.py` + `extract_bone.py` threshold/watershed/heuristics +
+`resegment_pairs.py` consistency pass) is DEPRECATED for bone surfaces; its invariants
+below are tagged **Previous method** and kept for comparison only. Do not extend it.
+
+Resolution truth (corrected 2026-11-01 after the user questioned it): the coronal and
+sagittal series are tagged `DERIVED\SECONDARY\MPR`, but the console built them from
+the thin 0.625 mm raw reconstruction, not from the exported 3 mm axial slices. Measured
+on the data: along the body axis the real sagittal/coronal series have high-frequency
+content 0.26 vs 0.14-0.19 for the 3 mm axial resampled onto the same grid, cortical
+edge gradient 32 vs 19 HU/px, and the series are aligned to <0.1 mm. ORIGINAL axial
+series: 404 (chest, 0.453 x 0.453 x 1 mm, kernel YB), 405/407 (2 mm), 401/501/601
+(3 mm, kernel B); 502/503 are byte-identical duplicates of 602/603. Each series is
+sharp in two directions and blurred across its slice thickness only, so the three
+together resolve every direction twice. `fuse_series.py` fuses them in the Fourier
+domain (weights exp(-2 (f_n t)^2) along each series' slice normal) onto a 0.6 mm
+isotropic grid: abdomen and pelvis become ~0.6-0.7 mm isotropic instead of 0.68 x 0.68
+x 3 mm; the chest is dominated by the 1 mm axial. The earlier statement here that
+"fusion never added resolution" was wrong (the previous method's spatial-domain average
+simply did not exploit it). Facet and costovertebral joint spaces (0.5-1 mm) remain at
+voxel scale. For future scans, request a 0.6-1 mm bone-kernel axial reconstruction of
+the whole body (collimation was 0.625 mm, so the raw data supports it).
+
+Why the previous method was replaced: ~15 hand-tuned rules that broke each other;
+hollow vertebral bodies where marrow fell below the fill threshold; rib heads left on
+vertebrae; independent per-bone extraction that then needed a reconciliation pass.
+
+Current method, `segment_nni.py` (nnInteractive v1.0, DKFZ / Helmholtz Imaging;
+Isensee, Rokuss, Krämer et al. 2025, arXiv 2503.08373). Invariants:
+
+- LICENCE: the nnInteractive weights are CC BY-NC-SA 4.0 (non-commercial); the Python
+  backend is Apache-2.0. Weights: Hugging Face `nnInteractive/nnInteractive`, folder
+  `nnInteractive_v1.0` (411 MB), in `~/.cache/nnInteractive/nnInteractive_v1.0`
+  (default `--model-dir`). Package `nninteractive` 2.6.0 in the repo `.venv`, torch
+  2.13 on MPS; the tool sets `PYTORCH_ENABLE_MPS_FALLBACK=1` (`adaptive_avg_pool3d` is
+  missing on MPS).
+- Input is an existing `pipeline.py` run folder (`run.json`, `series/`, `totalseg/`).
+  Each bone uses the group whose ORIGINAL axial series contains its guide label
+  (`--group-margin-mm` 5; `--group-override BONE=GROUP` forces one). Guide = the
+  TotalSegmentator label, else the fitted-atlas label from `--atlas-labels`.
+- Per bone: crop around the guide with `--margin-mm` 25. `--planes fused` (default):
+  the crop is fused by `fuse_series.py` from the group's axial + coronal + sagittal
+  series onto a `--fused-mm` 0.6 mm isotropic grid (about 1 s per bone; the group's
+  label grid and all masks live on that grid). `--planes axial`: native axial voxels
+  only (the ct2021-nni run). The coarse label is the initial segmentation; then
+  `--pos-points` 2 positive prompts deep inside the bone and `--neg-points` 1 negative
+  prompt inside each neighbouring bone's label near the bone (`--point-sep-mm` 20);
+  keep the largest connected component and fill holes. Masks are cached in
+  `RUN/nni_fused/masks/` (`RUN/nni/masks/` for `--planes axial`; `--force` redoes
+  them, `--skip-segment` only re-resolves and re-meshes).
+- Joint resolution: all bones of a group share one label grid; a voxel claimed by two
+  bones goes to the bone whose uncontested core is nearer (`--resolve-with` adds
+  existing masks of the same group). No pairwise reconciliation pass is needed.
+  Neighbours segmented on different series (L2 on the 1 mm chest series, L3 on the
+  3 mm abdomen series) are resolved across groups afterwards: where the finer series'
+  bone exists, the coarser series' neighbour gives way (`carve_across_groups`).
+- Mesh: 0.5 iso-surface of the Gaussian-smoothed mask (`--smooth-mm` 0.5;
+  `--smooth-min-vox`, default 0, was 0.8 for the axial-only run so 3 mm slices did not
+  stair-step; the fused grid needs none), then
+  `--smooth-iters` 10 Taubin iterations; PLY/STL in Blender metres (LPS mm x 0.001,
+  scanner origin kept) plus a JSON per bone in `RUN/nni_fused/meshes/`.
+- Measured vs inferred: `RUN/nni_fused/qa/contacts.json` records every touching pair's
+  interface and HU. Median HU above `--measured-max-hu` 450 = no visible joint space =
+  boundary INFERRED by the model's anatomical prior; below it = measured. Never report
+  an inferred boundary as a measured joint gap.
+- Blender (`--blender`): import by bone name + `--suffix`, replacing the same-named
+  object, into `--collection` (default `bones`), with `ct_run` (`--run-tag`, default
+  `ct2021-nni-fused`), `ct_method`, `ct_group`, `ct_planes`, `ct_series`,
+  `ct_voxel_mm`, `ct_inferred_boundaries`; `--replace` first removes other runs' objects from the
+  collection. Pilots use `--collection bones_nni --suffix _nni` to keep the old bones.
+- Bones are never moved, and the atlas never shapes a bone: it is used only for
+  naming, ownership (fallback guide label), and QA.
+- QA: `register_atlas.py RUN --meshes-dir RUN/nni_fused/meshes ... --out
+  RUN/nni_fused/atlas_check --no-cartilage`, `check_overlaps.py RUN/nni_fused --exact
+  --samples 3000 --out RUN/nni_fused/qa`,
+  and `reference_check.py`, which scores one or more mesh folders against an
+  ALREADY-FITTED atlas reference (`<bone>_atlas.ply`) without refitting, so methods are
+  compared on one fixed yardstick: `mean_mm`, `p95_mm`, `far_frac` (CT surface >
+  `--far-mm` 4 from its own reference), `misassigned_frac` (far from its own and within
+  `--near-mm` 1.5 of a neighbour's reference), `missing_frac` (reference surface >
+  `--far-mm` from the CT mesh: bone not captured), `volume_cm3`. The reference is a
+  yardstick only.
+- Running rules: about 60-130 s per bone on an Apple M5 (32 GB) (26 s initial
+  refinement + ~6 s per point prompt), 55 bones in about 80 minutes. Full-grid bool
+  labels are ~230 MB each on the chest grid, so at most 8 are cached. Never run
+  `segment_nni.py` concurrently with other heavy jobs (an exact `check_overlaps.py` run
+  was killed for memory while segmentation ran); run QA after segmentation finishes.
+- Pilot evidence (T8, 1 mm chest, same fixed reference), previous -> new: volume 18.0
+  -> 26.9 cm3 (old body hollow); missing reference surface 5.6% -> 1.5%; mean residual
+  1.79 -> 1.75 mm; mask voxels below 0 HU 6.7% -> 4.4%; dense bone (> 300 HU) within
+  2 mm outside the mask 24.9k -> 16.5k voxels. The new mask fits the data better on
+  both sides while being solid; raw-slice contour overlays show it following the cortex
+  and stopping at the disc and the rib head.
+- State (2026-11-01): 55 bones in `spine/ct_bones.blend`, collection `bones`, run tag
+  `ct2021-nni-fused`, all on fused 0.6 mm crops (chest 404+406, abdomen 601+602+603);
+  `rib_right_11` forced to the chest group (`--group-override rib_right_11=Lung`);
+  `rib_right_12`, L3-L5, sacrum, hips, and femurs come from the abdomen group. The
+  axial-only run stays on disk as `RUN/nni` (tag `ct2021-nni`) for comparison. Fused
+  vs axial-only: sacral foramina open, 3 mm terracing gone; dense bone left within
+  1.2 mm outside the mask 1324 -> 397 mm3 (sacrum), 455 -> 253 mm3 (L3), 275 -> 42 mm3
+  (left first rib); volumes within 5% except first ribs (-15%, a soft-tissue blob at
+  the rib head dropped) and right 12th rib (-12%); contacts 23 measured / 35 inferred
+  (25 / 33). Known blemish: a faint seam down the left iliac wing; all three series
+  cover the hip and none has a slice discontinuity there, so it is most likely an
+  nnInteractive patch-tiling seam on the large hip crop, not a fusion artefact. Label grids of the fused run are not
+  saved yet (`RUN/nni/labels` holds the axial-only ones).
+
+Shared tools and the previous method: `pipeline.py` runs DICOM series groups -> TotalSegmentator guides ->
+`fuse_planes.py` -> `extract_bone.py` -> `blender_bridge.py`, cached per run directory
+with a `run.json` manifest and `--jobs N` bones in parallel (2-4 GB RAM each); it
+forwards `--finest-only` to `fuse_planes.py`, and `--atlas-labels DIR` and
+`--extract-args ...` (everything after it) to `extract_bone.py`; `--smooth-iters`
+defaults to 5. `export_atlas_meshes.py` (headless Blender) exports the 277 Z-Anatomy
+bones as PLY into `<segmentation>/atlas/meshes/`; `index_bp3d.py` indexes BodyParts3D
+4.0 as an alternative atlas; `register_atlas.py` fits either to the CT bones
+(`atlas/`, costal cartilages included); `align_groups.py` brings secondary
+acquisition groups into the primary group's frame (`align/`); `compare_runs.py` diffs
+two runs; `check_overlaps.py` is the second-pass QA of neighbouring bones (`qa/`);
+`resegment_pairs.py` is the consistency pass that re-cuts flagged pairs
+(`pipeline.py --resegment` runs both at the end of a run); `extract_discs.py`
+segments the intervertebral discs (`discs/`). Never edit
+`tools/ct/*.py` while `pipeline.py --jobs N` runs: the spawned workers re-import the modules and crash on
+mismatched arguments; killing the main process leaves idle orphan multiprocessing
+workers that must be killed too. Invariants:
+
+- Blender metres = scanner LPS mm x 0.001, scanner origin kept (+X left, +Y posterior,
+  +Z superior); one shared transform, so joint gaps are the scan's. The target `.blend`
+  is metric with millimetre display; `scale_length` stays 1.0.
+- `--match` groups are listed highest resolution first
+  (`--match Lung --match Delayed`); a group is every series matching one of its
+  `|`-separated substrings (all planes, several reconstructions per plane), and must
+  be one co-registered acquisition. Each bone comes from the first group whose axial
+  volume fully contains its guide label. `segment_nni.py` reads the groups from
+  `run.json` but uses only each group's finest ORIGINAL axial series.
+- **Previous method.** Fusion weights inputs by edge direction and slice thickness (`--thickness-power` 1);
+  grids snap to a global lattice from the scanner origin, so neighbouring ROIs share
+  voxels exactly. Every input of a group is fused by default (smoother surfaces,
+  preferred); `--finest-only` keeps the finest series per plane and drops series
+  thicker than `--max-thickness-ratio` 2.5x the finest (sharper edges, +27% gradient
+  on T4, but noisier, rougher surfaces).
+- **Previous method.** Surface = 250 HU iso-surface of the fused 0.45 mm volume, padded with air so it is
+  closed. A 0.6 mm Gaussian on the fused volume before any thresholding removes the
+  speckle of the sharp lung kernel (little spikes on chest bones) without moving a
+  symmetric edge; `pipeline.py --denoise-mm auto` (default) applies it only to groups
+  whose finest slices are <= 1.5 mm, not to the smooth-kernel pelvis. TotalSegmentator
+  labels (1.5 mm) only seed the split where confident: a label is trusted within
+  `--label-reach-mm` 4 of itself; bone outside the `--band-mm` 4 band around label
+  boundaries follows the nearest label. `--split distance` (default) is a watershed on
+  the distance transform, run first on the cortex above `--split-level` 500 HU so thin
+  joints bridged by partial volume fall apart; the softer 250-500 HU shell is then
+  grown onto the cores by a watershed on inverted intensity (fronts meet on the
+  darkest path, the joint; joining the nearest core cut a thin seam through vertebral
+  bodies whose lateral wall fell below 500 HU). `--rib-band-mm` 20 applies one-sidedly
+  where a non-rib label is nearest and a rib label is the runner-up, since
+  TotalSegmentator puts rib heads, necks, and tubercles on the vertebra (its rib label
+  stops ~26 mm short of the head). Rib prior: from the medial end of each rib label a
+  cylinder (`--rib-extend-mm` 30, `--rib-radius-mm` 6) is extended along the rib's
+  local direction towards the spine; dense cortex (> `--split-level`) inside it that
+  connects to the rib label and is not deeper than `--rib-core-erode-mm` 6 inside a
+  vertebra label is marked as that rib. Alternatives: `--split hu` (inverted
+  intensity) and `--split cascade` with `--levels` (900 -> 250 HU, merged pieces cut
+  at the thinnest neck; worse on T4: ragged, grabbed neighbours). The target label is
+  closed and hole-filled (`--guide-close-mm` 5) before the ROI (`--guide-margin-mm`
+  8), since the sacrum label misses the S1 body. `extract_bone.py --target` accepts
+  several bones, cut in one shared partition (joint extraction); one target behaves
+  as before.
+- **Previous method.** Solid fill: marrow > 100 HU (`--core-level`) inside an 8 mm silhouette
+  (`--envelope-mm`) plus > 150 HU (`--fill-level`) within 2x `--solid-close-mm` (2 mm)
+  of the cortex, closed and hole-filled; pockets < 60 HU and > 50 mm3 (canal, foramen
+  contents) are carved back out. The per-bone JSON records `basins_file`, `basin_ids`,
+  `target_id` for `check_overlaps.py`.
+- **Previous method.** `pipeline.py` Blender objects carry `ct_group`, `ct_level_hu`, `ct_run` (`--run-tag`, default
+  `<out name>@<time>`); objects in the collection from other runs are removed at the
+  end of a run unless `--keep-old`. `--blender append|new` needs BlenderMCP on
+  localhost:9876; otherwise meshes stay in `<run>/meshes/`.
+- Atlas prior: `register_atlas.py RUN --meshes-dir ... --out RUN/atlas` fits every
+  atlas bone to its CT bone (global similarity from matched centroids, sternum, skull,
+  and costal cartilages excluded as composites; then a per-bone two-way similarity
+  ICP with guards, a rigid retry, and a global fallback; partially scanned bones
+  flagged) and writes `meshes/<bone>_atlas.ply`, `labels/<bone>.nii.gz` (0.9 mm), and
+  `atlas_fit.json`. 2021 scan: 55 bones in 126 s; mean residual 1.3-2.3 mm on
+  vertebrae, 1-3 mm on ribs, 3-4 mm on hips and sacrum.
+  Previous method: `extract_bone.py --atlas-labels DIR` (via `pipeline.py --atlas-labels`) decides
+  ownership from the fitted shapes: a bone owns its atlas shape plus whatever its
+  coarse label covers that no other bone's atlas claims (coccyx stays with the sacrum,
+  the rib head leaves the vertebra); `--atlas-skip` (default femur_left, femur_right,
+  humerus_left, humerus_right, vertebrae_C6) keeps the coarse label for partially
+  scanned bones.
+  Surfaces come only from the CT iso-surface: the atlas never shapes or moves a bone,
+  and the per-bone fit follows rotated or asymmetric vertebrae. Effect: rib bone left
+  on T4 0.81 -> 0.09 cm3; L5-sacrum overlap 2.4 cm3 / 4.9 mm penetration -> 1 mm3 /
+  none. `--blender` imports the globally fitted atlas into a hidden `atlas` collection.
+- Costal cartilages: calcified costal cartilage exceeds 250 HU and TotalSegmentator
+  labels it as rib (its `costal_cartilages` class was 0.5 cm3 on the 2021 scan), so
+  the first ribs ran into the sternum. `register_atlas.py --cartilage` (default on)
+  carries each fitted rib's transform onto the atlas costal cartilage of that rib
+  (Z-Anatomy ribs 1-10, BodyParts3D ribs 1-7) and writes
+  `labels/costal_cartilage_{side}_{n}.nii.gz`; `--reuse-fit` adds them to an existing
+  fit without refitting bones. With fitted-atlas labels, `pipeline.py` treats
+  `costal_cartilage_{side}_{n}` as extra classes (`label_path` falls back to the atlas
+  label; neighbours: its rib, the sternum, adjacent cartilages; rib n and the sternum
+  list it as a neighbour), extracts each as its own object, and imports them into a
+  Blender collection `cartilage`. They are stiff links, not bone.
+- BodyParts3D atlas: `index_bp3d.py ATLAS_DIR` (here `spine/atlas_bp3d/`) builds
+  `atlas_bones.json` and per-part PLYs (metres, Z-Anatomy atlas schema); the
+  TotalSegmentator -> BodyParts3D map is `ts_to_bp3d.json` beside them. Fit with
+  `register_atlas.py --atlas-json --atlas-meshes --atlas-mapping`. 2021 scan:
+  per-bone residuals tie with Z-Anatomy (2.42 vs 2.32 mm mean). BodyParts3D 4.0 is
+  CC BY 4.0 per its README (OBJ headers still say CC BY-SA 2.1 JP); keep
+  `ATTRIBUTION.txt` and credit "BodyParts3D, © The Database Center for Life Science
+  licensed under CC Attribution 4.0 International".
+- Group alignment: `align_groups.py RUN --primary Delayed --blender` extracts the
+  vertebrae both acquisitions cover from both groups, fits ONE rigid transform (no
+  scale) from the secondary group onto the primary, and applies it to every
+  secondary-group bone (originals in `meshes/unaligned/`, transform in each bone's
+  JSON and `align/alignment.json`; Blender objects get `ct_aligned_to`,
+  `ct_align_rms_mm`). The pelvis (Delayed) is the reference frame; no bone is ever
+  moved individually. 2021 scan: the two acquisitions were already co-registered to
+  0.16 mm (rigid fit 0.01 deg / 0.04 mm on T11-L2), so nothing had to move.
+- `check_overlaps.py` flags neighbouring pairs OK/CHECK/BAD from overlapping voxels,
+  split disagreements between the two independent runs, penetration depth, and minimum
+  joint gap. Its default fast inside test (KD-tree, sign of the nearest face normal)
+  can report a false "penetration" on interlocking surfaces whose voxel overlap is
+  zero: trust the voxel columns first; `--exact` uses ray tests (needs `rtree`,
+  minutes per pair on these meshes).
+- **Previous method.** Consistency pass: independent per-bone extractions disagree at shared joints (two
+  runs, two decisions); the 2021 overlap report flagged 33 pairs, almost all rib heads
+  and facet joints, some with 2-8 mm mesh interpenetration. `resegment_pairs.py RUN
+  --pairs A:B ... | --overlaps RUN/qa/overlaps.json --atlas-labels DIR --blender`
+  cuts a pair with ONE shared decision per voxel: a voxel in both final masks goes to
+  the bone whose fitted-atlas label claims it, else to the nearer bone body; bone one
+  run handed to the partner's basin that the partner's run did not keep ("orphans",
+  typically a rib head or a facet process) joins the partner when connected to it;
+  overlaps are arbitrated again after that step; both bones are re-meshed from their
+  own fused volumes with the partner's adjusted mask cut out, so the surfaces meet
+  exactly on the shared boundary. Nothing is moved; originals go to
+  `meshes/before_resegment/`, each changed bone's JSON gains `resegmented_with`.
+  2021 spine: every lumbar pair and the lower thoracic pairs now have zero overlap and
+  gaps of 0.03-0.2 mm (facets still meet with no gap at 3 mm slices, as before).
+  `pipeline.py --resegment` runs `check_overlaps.py`, then `resegment_pairs.py` over
+  all consecutive vertebra pairs plus every BAD pair with >= 1 mm penetration, then
+  `check_overlaps.py` again.
+- Discs: `extract_discs.py --run RUN [--meshes-dir] [--out RUN/discs] [--levels ...]
+  [--blender --collection discs] [--blender-only]` segments every disc between
+  consecutive vertebra meshes (C7-T1 ... L5-sacrum) from the fused CT: the
+  low-density region (HU window 40-250) between the two endplates (opposed
+  distance gradients), inside a corridor through both vertebral-body outlines, with
+  a bone trough above and below; footprint = the two endplate outlines' convex hulls
+  intersected. Per level a mesh (metres, Blender/LPS frame) and a JSON: centre,
+  normal, in-plane axes, mean/min/max/anterior/posterior height, footprint area and
+  radii, volume, wedge angle (signed sagittal), endplate centres and normals, a
+  5-ring radial HU profile, coverage, flags. `nucleus_radius_ratio` 0.5 is a stated
+  default (CT cannot see the nucleus). `--blender`: disc meshes into collection
+  `discs` plus an Empty `<level>_center` (ARROWS, size = equivalent radius, local Z =
+  disc normal, local X = major axis) carrying all parameters as custom properties,
+  for a force-based disc model, not a mesh element. ~25 s per level. 2021 scan:
+  lumbar discs 42-48 mm wide, 30-33 mm deep, 4-6 mm high, lordotic wedges 4-8 deg;
+  L5-S1 3.4 mm (2.5 mm posteriorly); thoracic discs measure 1.5-2.5 mm, below the
+  scan's resolution (real 4-7 mm), flagged thin; T7-T8, T8-T9, T10-T11, C7-T1
+  flagged unreliable on the snapshot used.
+
+Limitations: acquisitions differ by a few mm (breathing, table move) until
+`align_groups.py` applies one rigid transform per group; facet and costovertebral
+joint spaces (0.5-1 mm) are at or below the voxel size (1 mm chest slices, 3 mm
+abdomen and pelvis slices), so most of those boundaries are INFERRED by the model, not
+measured (see `RUN/nni_fused/qa/contacts.json` and each object's `ct_inferred_boundaries`);
+a joint-thickness prior would be a modelling choice, not data. Previous method only:
+the costovertebral cut came from a rib prior plus the atlas prior (rib bone left on
+T4: 0.8 cm3 coarse, ~0.25 cm3 with the rib prior, 0.09 cm3 with the atlas prior), the
+3 mm lumbar facets met with no gap, and `resegment_pairs.py` fixed pairs
+`check_overlaps.py` flagged. Previous-method meshes are full resolution
+(~400k-900k faces; `--decimate` on import); `rtree` is needed for exact mesh queries
+(installed; without it `compare_runs.py` and `check_overlaps.py` fall back to a
+KD-tree); no automated tests, validate with `python -m compileall tools/ct`.
+
+Next priorities (CT):
+
+1. Thoracic disc heights: the nnInteractive vertebra masks stop at the endplates, so
+   re-run `extract_discs.py` on the new bones and check whether the thoracic discs
+   (1.5-2.5 mm before, real 4-7 mm) now measure. `extract_discs.py` currently reads the
+   previous method's `basins_file` masks and `fused/` volumes; the `RUN/nni_fused/meshes/`
+   JSONs carry neither, so it first needs a path that reads `RUN/nni_fused/masks/`
+   (0.6 mm isotropic crops) and the fused crop from `fuse_series.fuse_crop`.
+2. Muscles from the MyoSuite BodyParts3D-derived set.
+3. A second scan compared with `compare_runs.py` against `RUN/nni_fused/meshes`.
+
 ## Core Functions
 
 ### `alignment.base_object_name(name)`
@@ -717,6 +1008,14 @@ State at handoff (2026-10-25):
   (`train_posture_surrogate.py iterate`, 4 rounds) did not beat it (best -6.6), see
   Bone Chain. Live view: Move Bones + Posture Controller + Follow Training + Force
   Colors; `surrogate_dashboard.py` at http://localhost:8765 for the network view.
+- CT bones (2026-11-01): bone surfaces now come from `tools/ct/segment_nni.py`
+  (nnInteractive v1.0; weights CC BY-NC-SA 4.0, non-commercial) run on crops fused
+  by `fuse_series.py` from the axial + coronal + sagittal series (0.6 mm isotropic);
+  the threshold method is deprecated. 55 bones are in `spine/ct_bones.blend`,
+  collection `bones`, run tag `ct2021-nni-fused`; QA lives in `RUN/nni_fused/qa`
+  (`reference_check.json` scores the axial-only and fused runs on one yardstick). CT
+  next priorities (thoracic disc heights, muscles, second-scan comparison against
+  `RUN/nni_fused/meshes`) are listed under CT Bone Extraction.
 
 Next steps, in order:
 
