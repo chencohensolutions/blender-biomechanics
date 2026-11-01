@@ -547,7 +547,13 @@ Isensee, Rokuss, Krämer et al. 2025, arXiv 2503.08373). Invariants:
   1.2 mm outside the mask 1324 -> 397 mm3 (sacrum), 455 -> 253 mm3 (L3), 275 -> 42 mm3
   (left first rib); volumes within 5% except first ribs (-15%, a soft-tissue blob at
   the rib head dropped) and right 12th rib (-12%); contacts 23 measured / 35 inferred
-  (25 / 33). Known blemish: a faint seam down the left iliac wing; all three series
+  (25 / 33). Fixed atlas yardstick (`RUN/nni_fused/qa/reference_check.json`, 23
+  bones): the runs are indistinguishable (mean residual within 0.1 mm for 20 of 23;
+  left first rib 2.94 -> 1.51 mm; sacrum 4.10 -> 4.54 mm because open foramina add
+  surface the solid atlas lacks, missing 25.9 -> 22.3%); the atlas fit is 1.1-4.5 mm
+  off and cannot resolve sub-mm gains, so judge by the CT-based checks and overlays.
+  `reference_check.py` on hips/sacrum needs one bone per call and <= 4000 samples or
+  it is killed for memory. Known blemish: a faint seam down the left iliac wing; all three series
   cover the hip and none has a slice discontinuity there, so it is most likely an
   nnInteractive patch-tiling seam on the large hip crop, not a fusion artefact. Label grids of the fused run are not
   saved yet (`RUN/nni/labels` holds the axial-only ones).

@@ -313,7 +313,13 @@ terracing on sacrum, hips and lumbar bodies is gone; dense bone left within 1.2 
 outside the mask fell from 1324 to 397 mm3 on the sacrum and 455 to 253 mm3 on L3;
 volumes moved by less than 5% except the first ribs (-15%, an extra soft-tissue blob
 at the rib head dropped) and the right 12th rib (-12%); the 58 contact pairs are 23
-measured / 35 inferred (25 / 33 before). Known blemish: a faint seam line runs down
+measured / 35 inferred (25 / 33 before). On the fixed atlas yardstick
+(`nni_fused/qa/reference_check.json`, 23 bones) the two runs are indistinguishable:
+mean residual within 0.1 mm for 20 of 23 bones, left first rib 2.94 -> 1.51 mm (the
+dropped blob was not bone), sacrum 4.10 -> 4.54 mm because the open foramina add
+surface that the solid atlas sacrum lacks while its missing fraction falls 25.9 ->
+22.3%. The atlas fit itself is 1.1-4.5 mm off, so it cannot resolve sub-mm gains; the
+CT-based checks and the slice overlays are the evidence that counts. Known blemish: a faint seam line runs down
 the left iliac wing; all three series cover the hip and none has a slice
 discontinuity there, so it is most likely a patch-tiling seam of nnInteractive on the
 large hip crop (454 x 317 x 301 voxels), not a fusion artefact.
