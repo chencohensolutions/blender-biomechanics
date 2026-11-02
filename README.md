@@ -126,8 +126,9 @@ TotalSegmentator run downloads its model weights):
 uv pip install --python .venv/bin/python totalsegmentator SimpleITK scipy nibabel pydicom scikit-image pynrrd trimesh rtree
 ```
 
-- `segment_nni.py`: current bone segmentation: nnInteractive refinement of each bone on a fused isotropic crop (`--planes fused`, default) or on its ORIGINAL axial series (`--planes axial`), joint resolution of each acquisition group, meshes, interface report, Blender import.
-- `fuse_series.py`: Fourier-weighted fusion of the axial, coronal and sagittal series of one acquisition into an isotropic crop; every direction is taken from the series that resolve it. Used per bone by `segment_nni.py`; stand-alone for one crop with `--check-alignment`.
+- `run_ct.py`: the single entry point: TotalSegmentator guides, bones, muscles, organs, Blender import, one structure at a time with one progress line each (see Muscles, organs and the single entry point).
+- `segment_nni.py`: current bone and muscle segmentation: nnInteractive refinement of each structure on a fused isotropic crop (`--planes fused`, default) or on its ORIGINAL axial series (`--planes axial`), joint resolution of each acquisition group (muscles: one merged volume over all acquisitions, bones carved out), meshes, interface report, Blender import.
+- `fuse_series.py`: Fourier-weighted fusion of the axial, coronal and sagittal series of one acquisition into an isotropic crop; every direction is taken from the series that resolve it. `fuse_crop_multi` blends several acquisitions across their overlap, weighted by slice thickness (bones) or by measured noise (soft tissue). Used per structure by `segment_nni.py`; stand-alone for one crop with `--check-alignment`.
 - `reference_check.py`: scores one or more mesh folders against an already-fitted atlas reference without refitting, so two methods are measured against one fixed yardstick.
 - `pipeline.py`: end-to-end run: DICOM, series groups, TotalSegmentator guides, fusion, meshes, Blender. Its run folder is the input of `segment_nni.py`; its fusion and extraction steps are the previous method.
 - `fuse_planes.py` (previous method): fusion of every reconstruction of a group onto one isotropic grid, weighted by edge direction and slice thickness.
@@ -138,7 +139,8 @@ uv pip install --python .venv/bin/python totalsegmentator SimpleITK scipy nibabe
 - `register_atlas.py`: fits every atlas bone to its CT bone (global similarity, then per-bone ICP) and writes fitted meshes and label volumes, the anatomical prior for `--atlas-labels`, plus the costal cartilages carried by their fitted ribs.
 - `index_bp3d.py`: indexes the BodyParts3D 4.0 skeleton as an alternative atlas (`atlas_bones.json` and one PLY per part, metres).
 - `align_groups.py`: one rigid transform per secondary acquisition group onto the primary group, fitted on the vertebrae both cover.
-- `check_overlaps.py`: second-pass QA of neighbouring bones: overlap, split disagreement, penetration, joint gap.
+- `check_overlaps.py`: second-pass QA of neighbouring bones: overlap, split disagreement, penetration, joint gap (the mesh pass needs more memory than the fused run's meshes allow).
+- `overlap_masks.py RUN OUT.json`: bone-to-bone overlap of the model masks before the joint resolution (shared voxels, mm3, depth inside both bones) for every pair whose extents meet. On the fused run 11 of 524 pairs share voxels, all facet joints of adjacent vertebrae, at most 0.85 mm deep; the resolved meshes cannot interpenetrate beyond the 0.5 mm smoothing.
 - `resegment_pairs.py` (previous method): consistency pass: re-cuts neighbouring pairs with one shared decision per voxel, so both surfaces meet on one boundary.
 - `extract_discs.py`: every intervertebral disc between consecutive vertebra meshes (C7-T1 ... L5-sacrum) from the fused CT: one mesh and one parameter JSON per level, and with `--blender` a centre Empty carrying the parameters for a disc force model. It reads the previous method's masks (`basins_file`) and `fused/` volumes.
 
@@ -330,6 +332,106 @@ The full-grid boolean labels are about 230 MB each on the chest grid, so the too
 caches at most 8. Do not run `segment_nni.py` at the same time as other heavy jobs (an
 exact `check_overlaps.py` run was killed for memory while segmentation ran); run the
 QA after segmentation finishes.
+
+### Muscles, organs and the single entry point (`run_ct.py`)
+
+`segment_nni.py --structures muscles` applies the same model and the same three-plane fusion
+to every muscle TotalSegmentator can seed: the gluteals and iliopsoas (task `total`), the
+trunk muscles of task `abdominal_muscles` (pectoralis major, serratus anterior, latissimus
+dorsi, trapezius, rectus abdominis, external and internal oblique, erector spinae,
+transversospinalis, quadratus lumborum; psoas major is skipped because iliopsoas contains
+it), and the lower-neck muscles of task `headneck_muscles` that reach into the field
+(sternocleidomastoid, levator scapulae, the scalenes, prevertebral muscles, platysma). The
+licensed task `thigh_shoulder_muscles` (quadriceps, hamstrings, adductors, deltoid, rotator
+cuff, teres major, triceps, pectoralis minor) joins the same queue once a free non-commercial
+licence number is entered into TotalSegmentator.
+
+What differs from the bones:
+
+- One merged volume. Long muscles (erector spinae, latissimus) run through both acquisitions,
+  so muscles are segmented on ONE 0.8 mm isotropic grid over the union of the chest and the
+  abdomen scan plus the soft-kernel scan (`load_groups(merged=True, extra_series=...)`, group
+  `Body`, eight series). The acquisitions line up to 0.01 mm (`fuse_series.estimate_shift` on
+  their overlap). Each crop is fused per acquisition (`fuse_series.fuse_crop_multi`) and the
+  fusions are blended spatially across their overlap, with zero weight within 3 mm of a coverage edge and a 20 mm ramp, so neither
+  acquisition's slice blur enters the other's sharp region and the seam leaves no step.
+- Highest quality source. Where acquisitions overlap the weights follow the structure's
+  contrast: for bones the finer slices win (`quality="resolution"`, 1 / thickness); for soft
+  tissue the lower noise wins (`quality="noise"`, 1 / noise variance measured in the crop's
+  soft tissue). Measured in muscle: 35-50 HU of noise on the 1 mm chest series (lung kernel)
+  against 8-10 HU on the 3 mm soft-kernel series, with muscle contrast of 100-150 HU. For
+  that reason the muscles also fuse in the 3 mm soft-kernel chest+abdomen acquisition
+  (401 axial + 402 coronal + 403 sagittal, `--soft-tissue-series`), which is excluded for
+  bones: it brings pectoralis noise from 35 to 9 HU in the merged volume and dominates the
+  soft tissue everywhere, while the 1 mm chest data still fills in where it is the only source.
+- Components and prompts. A bone is one piece, so the bones keep the largest connected
+  component of the model output and get two positive prompts at the deepest points of the guide.
+  Soft tissue keeps every component that overlaps the guide label (a sheet muscle's output
+  breaks at its aponeurosis, the rectus at each tendinous intersection: with the bone rule the
+  external oblique kept 20-26% of its guide volume and the rectus 66%) and gets six positive
+  prompts spread along the guide's longest extent (`--pos-points`, `--point-sep-mm`).
+- Crop growth. The crop is the guide's box plus `--margin-mm` (25). Where a soft-tissue guide
+  stops short (TotalSegmentator's rectus abdominis ends about 10 cm above the pubis) the model
+  fills the crop to its face and the mesh ends in a flat cut, so while the mask reaches a crop
+  face that is not the scan's edge, the crop grows `--grow-mm` (40) there and the model refines
+  again from the mask, up to `--max-grow` times (3 for muscles / organs, 0 for bones). A grow
+  step whose mask exceeds `--grow-max-ratio` (1.8) times the guide volume is a leak along a
+  neighbour (the right external oblique climbed the chest wall to the armpit) and is rejected:
+  the previous mask is kept. The mask JSON records `grow_steps`, `grow_rejected` and
+  `touches_crop_face`.
+- Meshes keep every piece of real size (area at least 1% of the largest piece): the Gaussian
+  smoothing pinches a label apart where it is thin, and the earlier largest-piece rule dropped the
+  upper two bellies of a rectus whose voxels were all there (mesh JSON `components`).
+- Neighbours. Every other muscle whose guide reaches into the crop and every saved bone mask
+  that reaches into it are candidates; the largest `--max-neighbours` (12) get the negative
+  prompts. In the joint resolution a contested voxel goes first to the one structure whose guide
+  label covers it (the guides of one TotalSegmentator task are mutually exclusive) and only then
+  to the nearer uncontested core, so an over-grown neighbour cannot take a muscle's own territory.
+  Afterwards the bone masks are carved out of the muscle labels (bones always win), and `--measured-max-hu` defaults to 30 for soft tissue: an interface whose
+  median HU is below 30 has a visible fat plane (measured boundary; a 1-2 mm plane blurs to
+  +20-40 HU at 0.8 mm), above it the two muscles touch without one (inferred).
+- Outputs in `RUN/nni_fused_muscles/{masks,meshes,qa}`, Blender collection `muscles`, run tag
+  `ct2021-nni-fused-muscles`, custom property `ct_structure = muscle`. The 2026-11-01 run
+  segmented all 42 in 5 h 44 min (6557 cm3); the three fragments at the top edge of the field
+  (platysma both sides, posterior_scalene_left, 0.0-0.1 cm3) live in
+  `RUN/nni_fused_muscles/excluded/` and are not imported, so the collection holds 39 muscles.
+  The 2026-11-01 contact report still used `--measured-max-hu 0` and called every
+  muscle-muscle contact inferred; the default is now 30 HU and the next resolve recomputes it.
+
+`segment_nni.py --structures organs` runs the organs and vessels of TotalSegmentator's free
+task `total` through the same merged-volume path (`ORGAN_COLLECTIONS` in `segment_nni.py`):
+the five lung lobes, trachea, oesophagus, thyroid, heart (one body) and left atrial appendage
+into collection `thorax`; liver, spleen, kidneys, adrenals, gallbladder, pancreas, stomach,
+duodenum, small bowel, colon, bladder and prostate into `abdomen`; aorta, pulmonary vein,
+brachiocephalic trunk and veins, subclavian and carotid arteries, both venae cavae, portal and
+splenic vein, iliac arteries and veins into `vessels`; the spinal cord into `nervous`. The
+neighbours and the carve use the saved bone AND muscle masks (`--muscle-masks`), so no organ
+overlaps an earlier structure. Outputs in `RUN/nni_fused_organs`, run tag
+`ct2021-nni-fused-organs`, property `ct_structure = organ`. Kidney cysts are left out; the
+heart chambers, coronary arteries and aortic sinuses need TotalSegmentator's licensed tasks
+(`heartchambers_highres`, `coronary_arteries`, `aortic_sinuses`; a free non-commercial licence
+is requested at backend.totalsegmentator.com/license-academic and entered with
+`totalseg_set_license`), and this scan is not ECG-gated, so the heart border carries a few
+millimetres of motion blur whatever the model.
+
+`run_ct.py` chains everything with one progress line per structure:
+
+```sh
+.venv/bin/python tools/ct/run_ct.py --run "$RUN" --blender            # guides -> bones -> muscles -> organs -> Blender
+.venv/bin/python tools/ct/run_ct.py --run "$RUN" --structures muscles --blender
+.venv/bin/python tools/ct/run_ct.py --run "$RUN" --structures organs --blender
+.venv/bin/python tools/ct/run_ct.py --run "$RUN" --structures bones --bones T8 sacrum
+```
+
+Stage 1 runs TotalSegmentator (full resolution; `--fast-guides` is opt-in) for the bone classes,
+the three muscle tasks and the organ classes on each acquisition's finest axial series, skipping
+cached labels. Stages 2 to 4 call `segment_nni.py --quiet`, which prints `[k/N] name: seconds,
+cm3, median HU, neighbours` per structure and sends the model's own output to
+`OUT/qa/segment.log`. Every mask is cached, so a rerun only resolves, meshes and imports.
+Structures always run one at a time; the three planes of a crop are resampled in parallel inside
+the fusion. A structure whose crop box clipped the result (mask touching a crop face, as the
+left gluteus maximus did at 25 mm) is re-run alone with `segment_nni.py --bones NAME --force
+--margin-mm 40`, then `run_ct.py --skip-segment --blender` re-resolves and re-imports the set.
 
 ### Previous method: fusion, threshold, watershed (deprecated)
 

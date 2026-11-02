@@ -23,6 +23,7 @@ Model: nnInteractive v1.0 (DKFZ, CC BY-NC-SA 4.0 weights; code Apache-2.0),
 weights from Hugging Face `nnInteractive/nnInteractive` (see --model-dir).
 """
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -44,10 +45,52 @@ import pipeline  # noqa: E402
 MM_TO_BLENDER = 0.001
 DEFAULT_MODEL = Path.home() / ".cache" / "nnInteractive" / "nnInteractive_v1.0"
 
+# Muscles with a TotalSegmentator guide label (tasks: total, abdominal_muscles, headneck_muscles).
+# psoas_major (abdominal_muscles) is left out because iliopsoas (total) already covers it plus the
+# iliacus; autochthon (total) is left out because erector_spinae + transversospinalis split it.
+MUSCLES_TOTAL = [f"gluteus_{m}_{s}" for m in ("maximus", "medius", "minimus") for s in ("left", "right")] + \
+                ["iliopsoas_left", "iliopsoas_right"]
+MUSCLES_ABDOMINAL = [f"{m}_{s}" for m in ("pectoralis_major", "rectus_abdominis", "serratus_anterior", "latissimus_dorsi",
+                                          "trapezius", "external_oblique", "internal_oblique", "erector_spinae",
+                                          "transversospinalis", "quadratus_lumborum") for s in ("left", "right")]
+MUSCLES_HEADNECK = [f"{m}_{s}" for m in ("sternocleidomastoid", "levator_scapulae", "anterior_scalene", "middle_scalene",
+                                         "posterior_scalene", "prevertebral", "platysma") for s in ("left", "right")]
+MUSCLES = MUSCLES_TOTAL + MUSCLES_ABDOMINAL + MUSCLES_HEADNECK
+
+# Organs and vessels with a free TotalSegmentator guide label (task total), grouped by the Blender
+# collection they are imported into.  Kidney cysts are left out; the heart is one body here (the
+# chambers need the licensed heartchambers_highres task).
+ORGAN_COLLECTIONS = {
+    "thorax": ["lung_upper_lobe_left", "lung_lower_lobe_left", "lung_upper_lobe_right", "lung_middle_lobe_right",
+               "lung_lower_lobe_right", "trachea", "esophagus", "thyroid_gland", "heart", "atrial_appendage_left"],
+    "abdomen": ["liver", "spleen", "kidney_right", "kidney_left", "adrenal_gland_right", "adrenal_gland_left",
+                "gallbladder", "pancreas", "stomach", "duodenum", "small_bowel", "colon", "urinary_bladder", "prostate"],
+    "vessels": ["aorta", "pulmonary_vein", "brachiocephalic_trunk", "subclavian_artery_right", "subclavian_artery_left",
+                "common_carotid_artery_right", "common_carotid_artery_left", "brachiocephalic_vein_left",
+                "brachiocephalic_vein_right", "superior_vena_cava", "inferior_vena_cava", "portal_vein_and_splenic_vein",
+                "iliac_artery_left", "iliac_artery_right", "iliac_vena_left", "iliac_vena_right"],
+    "nervous": ["spinal_cord"],
+}
+ORGANS = [o for col in ORGAN_COLLECTIONS.values() for o in col]
+COLLECTION_OF = {o: col for col, names in ORGAN_COLLECTIONS.items() for o in names}
+STRUCTURES = {"muscles": MUSCLES, "organs": ORGANS}  # soft-tissue structure types (bones: pipeline.ALL_BONES)
+
 
 # ----------------------------------------------------------------------------- groups / labels
-def load_groups(run):
-    """Acquisition groups from run.json: ORIGINAL axial volume + TotalSegmentator folder each."""
+SOFT_TISSUE_SERIES = ["401_axial", "402_coronal", "403_sagittal"]  # the 3 mm soft-kernel chest+abdomen acquisition
+
+
+def load_groups(run, merged=False, extra_series=None):
+    """Acquisition groups from run.json: ORIGINAL axial volume + TotalSegmentator folder each.
+
+    merged=True returns ONE group "Body" spanning every acquisition (series_groups = the series of
+    each acquisition, totalseg = every group's label folder), for structures such as the erector
+    spinae that run through both the chest and the abdomen scan.  Valid because the acquisitions
+    of this scan line up to 0.01 mm (fuse_series.estimate_shift on their overlap).  extra_series
+    names series files (RUN/series/<name>.nrrd|.nii.gz) of a further acquisition that only the
+    merged group uses: the 3 mm soft-kernel chest+abdomen scan, excluded for bones (the user's
+    rule) but the lowest-noise source for soft tissue (user, 2026-11-01: "use 3mm if its less
+    noise for soft tissues, use all 3 planes")."""
     manifest = json.loads((run / "run.json").read_text())
     groups = []
     for name, g in manifest["groups"].items():
@@ -65,6 +108,30 @@ def load_groups(run):
                        "series": fuse_series.group_series(run, name)})
     order = {"Lung": 0, "Delayed": 1}
     groups.sort(key=lambda g: order.get(g["name"], 9))
+    if merged and len(groups) > 1:
+        acquisitions = list(groups)
+        for names in (extra_series or []):
+            paths = []
+            for n in names:
+                for ext in (".nrrd", ".nii.gz"):
+                    if (run / "series" / f"{n}{ext}").exists():
+                        paths.append(run / "series" / f"{n}{ext}")
+                        break
+            ss = [fuse_series.Series(str(p)) for p in paths]
+            axial = next((x for x in ss if x.normal_axis == 2), None)
+            if axial is None:
+                print(f"!! extra acquisition {names}: no axial series found, skipped")
+                continue
+            o = np.array(axial.img.GetOrigin()); e = o + (np.array(axial.img.GetSize()) - 1) * np.array(axial.img.GetSpacing())
+            acquisitions.append({"name": "+".join(names), "volume": paths[ss.index(axial)], "totalseg": None,
+                                 "series": ss, "bounds": [np.minimum(o, e), np.maximum(o, e)], "volumes": paths})
+        lo = np.min([g["bounds"][0] for g in acquisitions], axis=0)
+        hi = np.max([g["bounds"][1] for g in acquisitions], axis=0)
+        return [{"name": "Body", "volume": groups[0]["volume"], "totalseg": [g["totalseg"] for g in groups],
+                 "series_groups": [g["series"] for g in acquisitions],
+                 "series": [s for g in acquisitions for s in g["series"]],
+                 "bounds": [lo, hi], "volumes": [v for g in acquisitions for v in g["volumes"]],
+                 "members": [g["name"] for g in acquisitions]}]
     return groups
 
 
@@ -82,7 +149,16 @@ class Volume:
         axial = sitk.ReadImage(str(group["volume"]))
         assert np.allclose(np.array(axial.GetDirection()), np.eye(3).ravel(), atol=1e-3), "axial series expected"
         self.origin = np.array(axial.GetOrigin())  # LPS of voxel (0,0,0)
-        if planes == "axial":
+        self.series_groups = group.get("series_groups")
+        if self.series_groups:  # merged acquisitions: isotropic grid over the union of their extents
+            assert planes == "fused", "a merged group needs --planes fused"
+            self.hu = None
+            self.series = group["series"]
+            self.origin = np.array(group["bounds"][0], dtype=float)
+            extent = np.array(group["bounds"][1], dtype=float) - self.origin
+            self.spacing = np.array([fused_mm] * 3)
+            self.shape = tuple(int(np.floor(e / fused_mm)) + 1 for e in extent[::-1])
+        elif planes == "axial":
             self.hu = sitk.GetArrayFromImage(axial).astype(np.float32)  # (z, y, x)
             self.spacing = np.array(axial.GetSpacing())[::-1]  # (z, y, x) mm
             self.shape = self.hu.shape
@@ -97,6 +173,8 @@ class Volume:
         self.atlas_labels = atlas_labels
         self._labels = {}
         self._crops = {}
+        self._bounds = {}
+        self.totalseg_dirs = group["totalseg"] if isinstance(group["totalseg"], list) else [group["totalseg"]]
 
     MAX_CACHED = 4  # full-grid bool labels are ~230-290 MB each
     MAX_CROPS = 3
@@ -122,21 +200,83 @@ class Volume:
             origin = self.origin + np.array([sl[2].start, sl[1].start, sl[0].start]) * self.spacing[::-1]
             shape = tuple(s.stop - s.start for s in sl)
             t = time.time()
-            self._crops[key] = fuse_series.fuse_crop(self.series, origin, float(self.spacing[0]), shape)
+            if self.series_groups and len(self.series_groups) > 1:
+                self._crops[key] = fuse_series.fuse_crop_multi(self.series_groups, origin, float(self.spacing[0]), shape,
+                                                               quality=getattr(self, "quality", "resolution"))
+            else:
+                self._crops[key] = fuse_series.fuse_crop(self.series, origin, float(self.spacing[0]), shape)
             while len(self._crops) > self.MAX_CROPS:
                 self._crops.pop(next(iter(self._crops)))
         return self._crops[key]
 
+    def label_paths(self, name):
+        """Guide label files for `name`: one per acquisition folder that has it (else the atlas label)."""
+        out = []
+        for d in self.totalseg_dirs:
+            p = pipeline.label_path(name, {"totalseg": d}, None)
+            if p is not None:
+                out.append(p)
+        if not out and self.atlas_labels:
+            p = pipeline.label_path(name, {"totalseg": self.totalseg_dirs[0]}, self.atlas_labels)
+            if p is not None:
+                out.append(p)
+        return out
+
+    def guide_bounds(self, name):
+        """(lo, hi) LPS bounds of the guide label over all its files, or None when empty/missing."""
+        if name not in self._bounds:
+            bs = [b for b in (pipeline.label_bounds(p) for p in self.label_paths(name)) if b is not None]
+            self._bounds[name] = None if not bs else (np.min([b[0] for b in bs], axis=0), np.max([b[1] for b in bs], axis=0),
+                                                      int(sum(b[2] for b in bs)))
+        return self._bounds[name]
+
+    def box_from_bounds(self, lo, hi, margin_mm):
+        """(z, y, x) slice tuple of this grid covering LPS bounds lo..hi plus a margin, clipped to the grid."""
+        lo_i = np.floor((np.asarray(lo) - margin_mm - self.origin) / self.spacing[::-1]).astype(int)[::-1]
+        hi_i = np.ceil((np.asarray(hi) + margin_mm - self.origin) / self.spacing[::-1]).astype(int)[::-1] + 1
+        return tuple(slice(max(int(a), 0), min(int(b), int(n))) for a, b, n in zip(lo_i, hi_i, self.shape))
+
+    def crop_ref(self, sl):
+        """A SimpleITK image covering the crop window `sl` of this grid (to resample other images into)."""
+        size = [int(sl[2].stop - sl[2].start), int(sl[1].stop - sl[1].start), int(sl[0].stop - sl[0].start)]
+        ref = sitk.Image(size, sitk.sitkUInt8)
+        ref.SetSpacing(self.spacing[::-1].tolist())
+        ref.SetOrigin((self.origin + np.array([sl[2].start, sl[1].start, sl[0].start]) * self.spacing[::-1]).tolist())
+        return ref
+
+    def mask_crop(self, path, sl):
+        """A saved label/mask file resampled (nearest) into the crop window `sl`; bool (z, y, x)."""
+        img = sitk.ReadImage(str(path))
+        img = sitk.Resample(img, self.crop_ref(sl), sitk.Transform(), sitk.sitkNearestNeighbor, 0, sitk.sitkUInt8)
+        return sitk.GetArrayFromImage(img) > 0
+
+    def label_crop(self, name, sl):
+        """Guide label of `name` inside the crop window `sl` (union over acquisitions), or None."""
+        paths = self.label_paths(name)
+        if not paths:
+            return None
+        out = None
+        for p in paths:
+            arr = self.mask_crop(p, sl)
+            out = arr if out is None else (out | arr)
+        return out
+
     def label(self, bone):
+        """Full-grid guide label (kept for callers that need it; segment_structure works on crops)."""
         if bone not in self._labels:
-            path = pipeline.label_path(bone, self.group, self.atlas_labels)
-            if path is None:
+            paths = self.label_paths(bone)
+            if not paths:
                 self._labels[bone] = None
             else:
-                img = sitk.ReadImage(str(path))
-                if img.GetSize() != self.ref.GetSize() or not np.allclose(img.GetSpacing(), self.ref.GetSpacing()):
-                    img = sitk.Resample(img, self.ref, sitk.Transform(), sitk.sitkNearestNeighbor, 0, sitk.sitkUInt8)
-                self._labels[bone] = sitk.GetArrayFromImage(img) > 0
+                out = None
+                for path in paths:
+                    img = sitk.ReadImage(str(path))
+                    if img.GetSize() != self.ref.GetSize() or not np.allclose(img.GetSpacing(), self.ref.GetSpacing()) \
+                            or not np.allclose(img.GetOrigin(), self.ref.GetOrigin()):
+                        img = sitk.Resample(img, self.ref, sitk.Transform(), sitk.sitkNearestNeighbor, 0, sitk.sitkUInt8)
+                    arr = sitk.GetArrayFromImage(img) > 0
+                    out = arr if out is None else (out | arr)
+                self._labels[bone] = out
             while len(self._labels) > self.MAX_CACHED:
                 self._labels.pop(next(iter(self._labels)))
         return self._labels[bone]
@@ -165,6 +305,26 @@ def interior_points(mask, spacing, n, min_sep_mm):
         d2 = (((zz - p[0]) * spacing[0]) ** 2 + ((yy - p[1]) * spacing[1]) ** 2 + ((xx - p[2]) * spacing[2]) ** 2)
         work[d2 < min_sep_mm ** 2] = 0
     return pts
+
+
+def guided_components(mask, guide, log=print, min_frac=0.02):
+    """Soft tissue: keep every component of the model output that overlaps the guide label, plus any
+    that is at least min_frac of the output; stray islands go.  Sheet muscles break at their
+    aponeuroses and the rectus at its tendinous intersections, so the largest component alone lost
+    the upper half of the external oblique and the rectus abdominis.  Falls back to the largest
+    component when nothing overlaps the guide."""
+    comp, n = ndi.label(mask)
+    if n <= 1:
+        return mask
+    idx = np.arange(1, n + 1)
+    sizes = ndi.sum(mask, comp, index=idx)
+    hits = ndi.sum(guide, comp, index=idx)
+    keep = [int(i) for i in idx if hits[i - 1] > 0 or sizes[i - 1] >= min_frac * sizes.sum()]
+    if not keep:
+        keep = [int(np.argmax(sizes)) + 1]
+    out = np.isin(comp, keep)
+    log(f"    components: {n} in the model output, kept {len(keep)} ({out.sum() / max(mask.sum(), 1):.0%} of it)")
+    return out
 
 
 def largest_component(mask):
@@ -204,48 +364,154 @@ class Segmenter:
         return out > 0
 
 
-def segment_bone(bone, vol, seg, args, out_dir, log=print):
-    """Refine one bone; writes <bone>.nii.gz (crop) + <bone>.json.  Returns the json dict."""
-    lab = vol.label(bone)
-    if lab is None or not lab.any():
+def neighbour_masks(target, vol, sl, args, targets, bone_masks):
+    """[(name, bool crop)] of the structures that may touch `target` inside the crop window `sl`.
+
+    bones:   the joint graph (pipeline.neighbours) as guide labels.
+    muscles / organs: every other target of the same type whose guide reaches into the crop, plus
+             the already segmented structures (saved bone masks; for organs the muscle masks too) that
+             reach into it; the largest --max-neighbours (by voxels in the crop) are kept, each getting
+             --neg-points negative prompts."""
+    out = []
+    if args.structures == "bones":
+        for nb in pipeline.neighbours(target):
+            arr = vol.label_crop(nb, sl)
+            if arr is not None and arr.any():
+                out.append((nb, arr))
+        return out
+    lo = vol.origin + np.array([sl[2].start, sl[1].start, sl[0].start]) * vol.spacing[::-1]
+    hi = vol.origin + np.array([sl[2].stop, sl[1].stop, sl[0].stop]) * vol.spacing[::-1]
+    cands = []
+    for m in targets:
+        if m == target:
+            continue
+        b = vol.guide_bounds(m)
+        if b is None or np.any(b[1] < lo) or np.any(b[0] > hi):
+            continue
+        arr = vol.label_crop(m, sl)
+        if arr is not None and arr.any():
+            cands.append((m, arr, int(arr.sum())))
+    for name, path, blo, bhi in bone_masks:
+        if np.any(bhi < lo) or np.any(blo > hi):
+            continue
+        arr = vol.mask_crop(path, sl)
+        if arr.any():
+            cands.append((name, arr, int(arr.sum())))
+    cands.sort(key=lambda c: -c[2])
+    return [(n, a) for n, a, _ in cands[:args.max_neighbours]]
+
+
+def list_bone_masks(masks_dir):
+    """[(bone, path, lo_lps, hi_lps)] of the saved bone masks (their NIfTI extents)."""
+    out = []
+    for p in sorted(Path(masks_dir).glob("*.nii.gz")):
+        img = sitk.ReadImage(str(p))
+        o = np.array(img.GetOrigin()); e = o + (np.array(img.GetSize()) - 1) * np.array(img.GetSpacing())
+        out.append((p.name[:-7], p, np.minimum(o, e), np.maximum(o, e)))
+    return out
+
+
+def touched_faces(mask, sl, shape):
+    """(axis, side) of every crop face the mask reaches that is not the grid's own boundary."""
+    faces = []
+    for ax in range(3):
+        if sl[ax].start > 0 and np.take(mask, 0, axis=ax).any():
+            faces.append((ax, 0))
+        if sl[ax].stop < shape[ax] and np.take(mask, -1, axis=ax).any():
+            faces.append((ax, 1))
+    return faces
+
+
+def segment_structure(bone, vol, seg, args, out_dir, neighbours, log=print):
+    """Refine one structure; writes <name>.nii.gz (crop) + <name>.json.  Returns the json dict.
+    `neighbours(sl)` returns [(name, bool crop)] of the structures that may touch it in window sl."""
+    b = vol.guide_bounds(bone)
+    if b is None:
         raise RuntimeError(f"no guide label for {bone} in group {vol.group['name']}")
-    sl = crop_box(lab, args.margin_mm, vol.spacing, vol.shape)
+    sl = vol.box_from_bounds(b[0], b[1], args.margin_mm)
+    init = vol.label_crop(bone, sl)
+    if init is None or not init.any():
+        raise RuntimeError(f"empty guide label for {bone} in group {vol.group['name']}")
     t_hu = time.time()
     hu = vol.hu_crop(sl)
     if vol.hu is None:
         log(f"  {bone}: fused {hu.shape} crop from {vol.series_names} in {time.time() - t_hu:.0f} s")
-    init = lab[sl]
-    pos = interior_points(init, vol.spacing, args.pos_points, args.point_sep_mm)
-    neg = []
-    near = None
-    for nb in pipeline.neighbours(bone):
-        nl = vol.label(nb)
-        if nl is None:
-            continue
-        nl = nl[sl]
-        if not nl.any():
-            continue
-        # the part of the neighbour nearest to this bone matters most: restrict to within 40 mm of it
-        if near is None:
-            near = ndi.distance_transform_edt(~init, sampling=vol.spacing) < 40.0
-        cand = nl & near
-        pts = interior_points(cand if cand.any() else nl, vol.spacing, args.neg_points, args.point_sep_mm)
-        neg += [(nb, p) for p in pts]
+    sep = args.point_sep_mm
+    if args.structures != "bones":  # spread the prompts along a long or sheet muscle instead of clustering in its thickest belly
+        ext = (np.ptp(np.array(np.where(init)), axis=1) + 1) * vol.spacing
+        sep = max(sep, float(ext.max()) / max(args.pos_points, 1))
+    pos = interior_points(init, vol.spacing, args.pos_points, sep)
+
+    def negatives(init_, sl_):
+        neg_ = []
+        near = None
+        for nb, nl in neighbours(sl_):
+            # the part of the neighbour nearest to this bone matters most: restrict to within 40 mm of it
+            if near is None:
+                near = ndi.distance_transform_edt(~init_, sampling=vol.spacing) < 40.0
+            cand = nl & near
+            pts = interior_points(cand if cand.any() else nl, vol.spacing, args.neg_points, args.point_sep_mm)
+            neg_ += [(nb, p) for p in pts]
+        return neg_
+
+    def clean(mask_, init_):
+        mask_ = largest_component(mask_) if args.structures == "bones" else guided_components(mask_, init_, log)
+        return ndi.binary_fill_holes(mask_)
+
+    neg = negatives(init, sl)
     log(f"  {bone}: crop {hu.shape}, {len(pos)} positive, {len(neg)} negative prompts")
     t0 = time.time()
-    mask = seg.run(hu, init, pos, neg, log=log)
-    mask = largest_component(mask)
-    mask = ndi.binary_fill_holes(mask)
+    mask = clean(seg.run(hu, init, pos, neg, log=log), init)
+    # A guide that stops short (TotalSegmentator's rectus abdominis ends ~10 cm above the pubis) gives
+    # a crop the real structure runs out of: the model fills it to the face and the mesh ends in a
+    # flat cut.  While the mask reaches a crop face that is not the scan's edge, grow the crop there
+    # and refine again from the mask (up to --max-grow times, --grow-mm per step).
+    grown = 0
+    grow_rejected = False
+    while grown < args.max_grow:
+        faces = touched_faces(mask, sl, vol.shape)
+        if not faces:
+            break
+        step = np.ceil(args.grow_mm / vol.spacing).astype(int)
+        new_sl = list(sl)
+        for ax, side in faces:
+            s_ = sl[ax]
+            new_sl[ax] = slice(max(s_.start - int(step[ax]), 0), s_.stop) if side == 0 else \
+                slice(s_.start, min(s_.stop + int(step[ax]), vol.shape[ax]))
+        new_sl = tuple(new_sl)
+        shift = np.array([o.start - n.start for o, n in zip(sl, new_sl)])
+        prev = np.zeros(tuple(n.stop - n.start for n in new_sl), dtype=bool)
+        prev[tuple(slice(int(sh), int(sh) + m) for sh, m in zip(shift, mask.shape))] = mask
+        sl = new_sl
+        hu = vol.hu_crop(sl)
+        init = vol.label_crop(bone, sl)
+        pos = [(np.array(p) + shift).tolist() for p in pos]
+        neg = negatives(init, sl)
+        grown += 1
+        log(f"  {bone}: mask reaches crop face(s) {faces}; grow {grown}/{args.max_grow}: crop {hu.shape}, "
+            f"refining again from the mask ({len(neg)} negative prompts)")
+        grown_mask = clean(seg.run(hu, prev, pos, neg, log=log), init | prev)
+        if grown_mask.sum() > args.grow_max_ratio * max(int(init.sum()), 1):
+            log(f"  {bone}: grow step {grown} rejected: mask {grown_mask.sum() * np.prod(vol.spacing) / 1000:.0f} cm^3 is "
+                f"over {args.grow_max_ratio:g}x the guide (leak along a neighbour); keeping the previous mask")
+            mask = prev
+            grow_rejected = True
+            break
+        mask = grown_mask
+    if grown and touched_faces(mask, sl, vol.shape):
+        log(f"  {bone}: still reaches crop face(s) {touched_faces(mask, sl, vol.shape)} after {grown} grow steps")
     elapsed = time.time() - t0
     vox_mm3 = float(np.prod(vol.spacing))
     img = sitk.GetImageFromArray(mask.astype(np.uint8))
     img.SetSpacing(vol.spacing[::-1].tolist())
     img.SetOrigin((vol.origin + np.array([sl[2].start, sl[1].start, sl[0].start]) * vol.spacing[::-1]).tolist())
     sitk.WriteImage(img, str(out_dir / f"{bone}.nii.gz"), useCompression=True)
-    info = {"bone": bone, "group": vol.group["name"], "series": vol.series_names, "planes": vol.planes,
+    info = {"bone": bone, "structure": args.structures[:-1], "group": vol.group["name"], "series": vol.series_names,
+            "planes": vol.planes,
             "spacing_mm_xyz": vol.spacing[::-1].tolist(), "crop_zyx": [[s.start, s.stop] for s in sl],
             "guide_voxels": int(init.sum()), "voxels": int(mask.sum()), "volume_cm3": float(mask.sum() * vox_mm3 / 1000),
-            "pos_points": pos, "neg_points": neg, "seconds": round(elapsed, 1),
+            "pos_points": pos, "neg_points": neg, "seconds": round(elapsed, 1), "grow_steps": grown, "grow_rejected": grow_rejected,
+            "touches_crop_face": [list(f) for f in touched_faces(mask, sl, vol.shape)],
             "hu_median": float(np.median(hu[mask])) if mask.any() else None,
             "frac_below_100hu": float((hu[mask] < 100).mean()) if mask.any() else None,
             "model": "nnInteractive_v1.0"}
@@ -263,8 +529,14 @@ def load_mask(path, vol):
     return arr, sl
 
 
-def resolve_group(bones, vol, masks_dir, log=print):
-    """Full-grid label volume for all `bones` of one group; contested voxels go to the nearer core."""
+def resolve_group(bones, vol, masks_dir, log=print, guide_tiebreak=False):
+    """Full-grid label volume for all `bones` of one group; contested voxels go to the nearer core.
+
+    guide_tiebreak (soft tissue): a contested voxel that exactly one of the two structures' guide
+    labels covers goes to that structure first.  The nearer-core rule alone favours an over-grown
+    neighbour (the left latissimus dorsi, 1.4x its guide, took 87 cm3 of the external oblique's
+    upper digitations); the TotalSegmentator guides of one task are mutually exclusive, so they
+    settle most of such overlaps where they are."""
     labels = np.zeros(vol.shape, dtype=np.int16)
     claims = np.zeros(vol.shape, dtype=np.int8)
     parts = {}
@@ -280,6 +552,26 @@ def resolve_group(bones, vol, masks_dir, log=print):
         own = arr & (claims[sl] == 1)
         labels[sl][own] = i
     contested = claims > 1
+    settled = 0
+    if contested.any() and guide_tiebreak:
+        owner = np.zeros(vol.shape, dtype=np.int16)  # 0 none, -1 two or more guides, else the one guide
+        for i, (b, arr, sl) in parts.items():
+            mine = arr & contested[sl]
+            if not mine.any():
+                continue
+            g = vol.label_crop(b, sl)
+            if g is None:
+                continue
+            hit = g & mine
+            o = owner[sl]
+            o[hit & (o != 0)] = -1
+            o[hit & (o == 0)] = i
+            owner[sl] = o
+        take = contested & (owner > 0)
+        labels[take] = owner[take]
+        contested &= ~take
+        settled = int(take.sum())
+        del owner
     if contested.any():
         best_d = np.full(vol.shape, np.inf, dtype=np.float32)
         best_i = np.zeros(vol.shape, dtype=np.int16)
@@ -307,7 +599,8 @@ def resolve_group(bones, vol, masks_dir, log=print):
         labels[contested] = best_i[contested]
         contested_total = int(contested.sum())
         del best_d, best_i
-    log(f"  group {vol.group['name']}: {len(parts)} bones, {contested_total} contested voxels resolved")
+    log(f"  group {vol.group['name']}: {len(parts)} bones, {settled} contested voxels settled by the guide labels, "
+        f"{contested_total} by the nearer core")
     return labels, {i: b for i, (b, _, _) in parts.items()}
 
 
@@ -344,6 +637,22 @@ def carve_across_groups(resolved, log=print):
                         lc[hit] = 0
                         log(f"  cross-series: {bf} ({gf['name']}) takes {int(hit.sum())} voxels from "
                             f"{idc[j]} ({gc['name']})")
+
+
+def carve_masks(labels, vol, bone_masks, log=print):
+    """Zero the label grid wherever a saved mask of an earlier structure type is (bones win over
+    muscles, bones and muscles win over organs, always)."""
+    total = 0
+    for name, path, blo, bhi in bone_masks:
+        sl = vol.box_from_bounds(blo, bhi, 0.0)
+        if any(s.stop <= s.start for s in sl):
+            continue
+        arr = vol.mask_crop(path, sl)
+        hit = arr & (labels[sl] > 0)
+        if hit.any():
+            labels[sl][hit] = 0
+            total += int(hit.sum())
+    log(f"  earlier structures carved out of the labels: {total} voxels")
 
 
 def contact_report(labels, ids, vol, measured_max_hu):
@@ -390,12 +699,20 @@ def mesh_bone(bone, idx, labels, vol, out_dir, smooth_mm, taubin_iters, extra, s
     offset = (np.array([s.start for s in sl], dtype=float) - 1.0) * vol.spacing
     verts_lps = vol.origin + (verts + offset)[:, ::-1]
     mesh = trimesh.Trimesh(verts_lps, faces, process=True)
+    # The Gaussian smoothing can pinch a label apart where it is thin (the rectus abdominis at its
+    # tendinous intersections, the external oblique's digitations, a vessel between two prompts), so
+    # keep every piece of real size and drop only marching-cubes specks: the earlier largest-piece
+    # rule silently threw away the upper two bellies of a rectus whose voxels were all there.
     parts = mesh.split(only_watertight=False)
+    n_parts = 1
     if len(parts) > 1:
-        mesh = max(parts, key=lambda p: p.area)
+        big = max(p.area for p in parts)
+        keep = [p for p in parts if p.area >= 0.01 * big]
+        n_parts = len(keep)
+        mesh = keep[0] if len(keep) == 1 else trimesh.util.concatenate(keep)
     if taubin_iters > 0:
         trimesh.smoothing.filter_taubin(mesh, lamb=0.5, nu=-0.53, iterations=taubin_iters)
-    mesh.fix_normals()
+    mesh.fix_normals(multibody=n_parts > 1)
     bl = mesh.copy()
     bl.apply_scale(MM_TO_BLENDER)
     ply, stl = out_dir / f"{bone}.ply", out_dir / f"{bone}.stl"
@@ -405,7 +722,7 @@ def mesh_bone(bone, idx, labels, vol, out_dir, smooth_mm, taubin_iters, extra, s
     info = {"name": bone, "method": "nnInteractive_v1.0 + joint resolve" + (" on fused planes" if vol.planes == "fused" else ""),
             "group": vol.group["name"], "series": vol.series_names, "planes": vol.planes,
             "spacing_mm_xyz": vol.spacing[::-1].tolist(),
-            "vertices": int(len(mesh.vertices)), "faces": int(len(mesh.faces)),
+            "vertices": int(len(mesh.vertices)), "faces": int(len(mesh.faces)), "components": int(n_parts),
             "volume_cm3": float(m.sum() * np.prod(vol.spacing) / 1000), "bbox_lps_mm_min": lo.tolist(),
             "bbox_lps_mm_max": hi.tolist(), "size_mm": (hi - lo).tolist(), "watertight": bool(mesh.is_watertight),
             "coords": "Blender = LPS mm * 0.001 (x=left, y=posterior, z=superior), scanner origin kept"}
@@ -418,19 +735,38 @@ def mesh_bone(bone, idx, labels, vol, out_dir, smooth_mm, taubin_iters, extra, s
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run", required=True, help="pipeline run folder (has run.json, series/, totalseg/)")
-    ap.add_argument("--bones", nargs="+", default=["all"], help="bone names (T8, rib_left_3, ...) or 'all'")
+    ap.add_argument("--bones", nargs="+", default=["all"], help="structure names (T8, rib_left_3, gluteus_medius_left, ...) or 'all'")
+    ap.add_argument("--structures", choices=["bones", "muscles", "organs"], default="bones",
+                    help="muscles: TotalSegmentator muscle guides (total + abdominal_muscles + headneck_muscles tasks) on ONE "
+                         "merged volume over all acquisitions; other muscles and the saved bone masks are the neighbours, "
+                         "bones are carved out afterwards; defaults become RUN/nni_fused_muscles, collection muscles, "
+                         "run tag ct2021-nni-fused-muscles, --fused-mm 0.8, --measured-max-hu 30 (fat plane = measured). "
+                         "organs: the same for the organs and vessels of task total, with the bone AND muscle masks as "
+                         "neighbours / carved out; imported into the collections thorax, abdomen, vessels, nervous")
+    ap.add_argument("--bone-masks", help="saved bone masks used as neighbours and carved out (default RUN/nni_fused/masks)")
+    ap.add_argument("--muscle-masks", help="organs: saved muscle masks used likewise (default RUN/nni_fused_muscles/masks)")
+    ap.add_argument("--max-neighbours", type=int, default=12, help="muscles: neighbours kept per structure (largest in the crop)")
+    ap.add_argument("--soft-tissue-series", nargs="*", default=SOFT_TISSUE_SERIES, metavar="SERIES",
+                    help="muscles: series files of a further acquisition fused in as well (default the 3 mm soft-kernel "
+                         "chest+abdomen scan 401/402/403; it wins where its noise is lower); pass nothing to disable")
     ap.add_argument("--out", help="output folder (default RUN/nni_fused, or RUN/nni with --planes axial)")
     ap.add_argument("--model-dir", default=str(DEFAULT_MODEL))
     ap.add_argument("--device", default="mps", help="mps | cpu | cuda")
     ap.add_argument("--atlas-labels", help="fitted atlas labels, used as guide where TotalSegmentator has none")
     ap.add_argument("--planes", choices=["fused", "axial"], default="fused",
                     help="fused: isotropic crops fused from axial+coronal+sagittal (fuse_series.py); axial: native axial only")
-    ap.add_argument("--fused-mm", type=float, default=0.6, help="isotropic voxel size of the fused grid")
+    ap.add_argument("--fused-mm", type=float, default=None, help="isotropic voxel size of the fused grid (0.6 bones, 0.8 muscles)")
     ap.add_argument("--margin-mm", type=float, default=25.0, help="crop margin around the guide label")
+    ap.add_argument("--grow-mm", type=float, default=40.0, help="crop growth per step where the mask reaches a crop face")
+    ap.add_argument("--grow-max-ratio", type=float, default=1.8,
+                    help="a grow step whose mask exceeds this multiple of the guide volume is rejected (leak guard)")
+    ap.add_argument("--max-grow", type=int, default=None,
+                    help="grow-and-refine steps when the mask reaches a crop face (default 3 for muscles / organs, 0 for bones)")
     ap.add_argument("--group-margin-mm", type=float, default=5.0,
                     help="a group is used when its ORIGINAL axial volume contains the guide label with this margin; "
                          "0 lets a bone at the very edge of the finer series still use it")
-    ap.add_argument("--pos-points", type=int, default=2)
+    ap.add_argument("--pos-points", type=int, default=None,
+                    help="positive prompts inside the guide (default 2 for bones, 6 for soft tissue, spread along its length)")
     ap.add_argument("--neg-points", type=int, default=1, help="negative prompts per neighbouring bone")
     ap.add_argument("--point-sep-mm", type=float, default=20.0)
     ap.add_argument("--group-override", nargs="*", default=[], metavar="BONE=GROUP",
@@ -444,23 +780,65 @@ def main(argv=None):
                     help="minimum Gaussian sigma in voxels per axis, so 3 mm slices do not leave stair steps "
                          "(0.8 vox = 2.4 mm across 3 mm slices, 0.36 mm in a 0.45 mm plane)")
     ap.add_argument("--smooth-iters", type=int, default=10, help="Taubin iterations")
-    ap.add_argument("--measured-max-hu", type=float, default=450.0,
-                    help="interface denser than this = no visible joint space = boundary inferred by the model")
+    ap.add_argument("--measured-max-hu", type=float, default=None,
+                    help="interface denser than this = no visible gap = boundary inferred by the model "
+                         "(default 450 for bones: joint space; 30 for muscles / organs: a thin fat plane, blurred)")
     ap.add_argument("--blender", action="store_true", help="import the meshes into the running Blender")
-    ap.add_argument("--collection", default="bones")
-    ap.add_argument("--run-tag", default="ct2021-nni-fused")
+    ap.add_argument("--collection", default=None, help="Blender collection (default bones / muscles)")
+    ap.add_argument("--run-tag", default=None, help="default ct2021-nni-fused / ct2021-nni-fused-muscles")
     ap.add_argument("--suffix", default="", help="object name suffix in Blender (pilot: keep old bones)")
     ap.add_argument("--replace", action="store_true", help="remove objects of other runs from the collection first")
+    ap.add_argument("--quiet", action="store_true",
+                    help="console shows one progress line per structure; everything else (model output, prompts) "
+                         "goes to --log-file")
+    ap.add_argument("--log-file", help="with --quiet: where the detailed output goes (default OUT/qa/segment.log)")
     args = ap.parse_args(argv)
+    if not args.quiet:
+        return run(args, lambda msg: print(msg, flush=True))
+    out = Path(args.out) if args.out else Path(args.run) / (
+        f"nni_fused_{args.structures}" if args.structures != "bones" else "nni_fused" if args.planes == "fused" else "nni")
+    log_path = Path(args.log_file) if args.log_file else out / "qa" / "segment.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    console = sys.stdout
+    with open(log_path, "a") as logf, contextlib.redirect_stdout(logf), contextlib.redirect_stderr(logf):
+        print(f"\n==== {time.strftime('%Y-%m-%d %H:%M:%S')} {' '.join(argv or sys.argv[1:])}")
+        return run(args, lambda msg: (print(msg, file=console, flush=True), print(msg, flush=True)))
 
+
+def run(args, say):
+    """The pipeline proper; `say` prints a progress line to the console (and the log when quiet)."""
     run = Path(args.run)
-    out = Path(args.out) if args.out else run / ("nni_fused" if args.planes == "fused" else "nni")
+    kind = args.structures
+    muscles = kind != "bones"  # soft tissue (muscles, organs): merged volume, noise-weighted fusion, saved masks carved out
+    if args.fused_mm is None:
+        args.fused_mm = 0.8 if muscles else 0.6
+    if args.pos_points is None:
+        args.pos_points = 6 if muscles else 2
+    if args.max_grow is None:
+        args.max_grow = 3 if muscles else 0  # the bone guides cover their bones; a short soft-tissue guide must not cut the mask
+    if args.measured_max_hu is None:
+        args.measured_max_hu = 30.0 if muscles else 450.0  # a 1-2 mm fat plane blurs to +20-40 HU at 0.8 mm
+    per_structure_collection = args.collection is None and kind == "organs"
+    if args.collection is None:
+        args.collection = kind
+    if args.run_tag is None:
+        args.run_tag = f"ct2021-nni-fused-{kind}" if muscles else "ct2021-nni-fused"
+    out = Path(args.out) if args.out else run / (f"nni_fused_{kind}" if muscles else "nni_fused" if args.planes == "fused" else "nni")
     masks_dir, meshes_dir, qa_dir = out / "masks", out / "meshes", out / "qa"
     for d in (masks_dir, meshes_dir, qa_dir):
         d.mkdir(parents=True, exist_ok=True)
-    bones = pipeline.ALL_BONES if args.bones == ["all"] else [pipeline.canonical(b) for b in args.bones]
-    bones = [b for b in bones if b != "costal_cartilages"]
-    groups = load_groups(run)
+    if muscles:
+        bones = STRUCTURES[kind] if args.bones == ["all"] else list(args.bones)
+        bone_masks = list_bone_masks(args.bone_masks or run / "nni_fused" / "masks")
+        if kind == "organs":
+            mdir = Path(args.muscle_masks) if args.muscle_masks else run / "nni_fused_muscles" / "masks"
+            bone_masks += list_bone_masks(mdir) if mdir.exists() else []
+        print(f"{kind}: {len(bones)} targets; {len(bone_masks)} saved masks of earlier structures as neighbours / carve")
+    else:
+        bones = pipeline.ALL_BONES if args.bones == ["all"] else [pipeline.canonical(b) for b in args.bones]
+        bones = [b for b in bones if b != "costal_cartilages"]
+        bone_masks = []
+    groups = load_groups(run, merged=muscles, extra_series=[args.soft_tissue_series] if muscles and args.soft_tissue_series else None)
     print("groups:", ", ".join(f"{g['name']} <- " + ("+".join(s.name for s in g["series"]) if args.planes == "fused"
                                                        else Path(g["volume"]).name) for g in groups))
     if args.planes == "fused":
@@ -471,6 +849,8 @@ def main(argv=None):
     def volume(g):
         if g["name"] not in volumes:
             volumes[g["name"]] = Volume(g, args.atlas_labels, planes=args.planes, fused_mm=args.fused_mm)
+            # soft tissue: where acquisitions overlap, the lower-noise one wins; bones: the finer one
+            volumes[g["name"]].quality = "noise" if muscles else "resolution"
         return volumes[g["name"]]
 
     overrides = {pipeline.canonical(k): v for k, v in (o.split("=", 1) for o in args.group_override)}
@@ -479,6 +859,12 @@ def main(argv=None):
         if b in overrides:
             assignment[b] = overrides[b]
             continue
+        if muscles:  # one merged group; keep the structures that have a guide label somewhere
+            if volume(groups[0]).guide_bounds(b) is None:
+                print(f"!! {b}: no guide label in any acquisition, skipped")
+                continue
+            assignment[b] = groups[0]["name"]
+            continue
         g, _ = pipeline.choose_group(b, groups, margin=args.group_margin_mm, atlas_labels=args.atlas_labels)
         if g is None:
             print(f"!! {b}: no guide label in any group, skipped")
@@ -486,17 +872,25 @@ def main(argv=None):
         assignment[b] = g["name"]
 
     # 1. segment
+    say(f"{args.structures}: {len(assignment)} structures to segment on {args.planes} planes "
+        f"({args.fused_mm} mm) -> {out}")
     if not args.skip_segment:
         seg = Segmenter(args.model_dir, args.device)
-        for b, gname in assignment.items():
+        items = list(assignment.items())
+        for k, (b, gname) in enumerate(items, 1):
             if (masks_dir / f"{b}.nii.gz").exists() and not args.force:
-                print(f"  cached {b}")
+                say(f"[{k}/{len(items)}] {b}: cached")
                 continue
             g = next(x for x in groups if x["name"] == gname)
+            vol = volume(g)
             try:
-                segment_bone(b, volume(g), seg, args, masks_dir)
+                cands = STRUCTURES[kind] if muscles else bones  # a single-structure run still sees every other one as a neighbour
+                info = segment_structure(b, vol, seg, args, masks_dir,
+                                         lambda sl, _b=b, _v=vol, _c=cands: neighbour_masks(_b, _v, sl, args, _c, bone_masks))
+                say(f"[{k}/{len(items)}] {b}: {info['seconds']:.0f} s, {info['volume_cm3']:.1f} cm^3, "
+                    f"median {info['hu_median']:.0f} HU, {len(info['neg_points'])} neighbours ({gname})")
             except (RuntimeError, ValueError, MemoryError) as exc:
-                print(f"!! {b}: {exc}")
+                say(f"!! [{k}/{len(items)}] {b}: {exc}")
 
     # 2. resolve per group, then across groups (finer series wins), then contact report + mesh
     results = {}
@@ -510,9 +904,12 @@ def main(argv=None):
         if not members:
             continue
         vol = volume(g)
-        labels, ids = resolve_group(members + extra, vol, masks_dir)
+        labels, ids = resolve_group(members + extra, vol, masks_dir, guide_tiebreak=muscles)
         resolved.append((g, vol, labels, ids, members))
     carve_across_groups(resolved)
+    if muscles:
+        for g, vol, labels, ids, members in resolved:
+            carve_masks(labels, vol, bone_masks)
     for g, vol, labels, ids, members in resolved:
         contacts.update(contact_report(labels, ids, vol, args.measured_max_hu))
         for i, b in ids.items():
@@ -526,8 +923,8 @@ def main(argv=None):
             if info:
                 results[b] = info
                 flags = ", ".join(f"{k}={v['boundary']}" for k, v in pairs.items())
-                print(f"  meshed {b}: {info['volume_cm3']:.1f} cm^3, {info['faces']} faces"
-                      + (f"  [{flags}]" if flags else ""))
+                say(f"  meshed {b}: {info['volume_cm3']:.1f} cm^3, {info['faces']} faces"
+                    + (f"  [{flags}]" if flags else ""))
     # merge with earlier runs in the same output folder (a partial re-run must not drop the other bones)
     def merged(path, key, new):
         prev = json.loads(path.read_text()) if path.exists() else {}
@@ -544,19 +941,24 @@ def main(argv=None):
     # 3. Blender
     if args.blender and results:
         try:
+            collection_of = (lambda b: COLLECTION_OF.get(b, args.collection)) if per_structure_collection else (lambda b: args.collection)
             if args.replace:
-                print(blender_bridge.run_code(pipeline.REMOVE_OTHER_RUNS % {"collection": args.collection,
-                                                                             "run_tag": args.run_tag}))
+                for col in sorted({collection_of(b) for b in results}):
+                    print(blender_bridge.run_code(pipeline.REMOVE_OTHER_RUNS % {"collection": col, "run_tag": args.run_tag}))
             for b, info in results.items():
-                props = {"ct_run": args.run_tag, "ct_method": info["method"], "ct_group": info["group"], "ct_planes": info["planes"],
+                props = {"ct_run": args.run_tag, "ct_structure": args.structures[:-1], "ct_method": info["method"],
+                         "ct_group": info["group"], "ct_planes": info["planes"],
                          "ct_series": info["series"], "ct_voxel_mm": [round(x, 3) for x in info["spacing_mm_xyz"]],
                          "ct_inferred_boundaries": [k for k, v in info["contacts"].items() if v["boundary"] == "inferred"]}
                 print("  " + str(blender_bridge.run_code(blender_bridge.IMPORT_MESH % {
-                    "path": str(meshes_dir / f"{b}.ply"), "name": b + args.suffix, "collection": args.collection,
+                    "path": str(meshes_dir / f"{b}.ply"), "name": b + args.suffix, "collection": collection_of(b),
                     "decimate": 0.0, "props": props})).strip())
+            cols = sorted({collection_of(b) for b in results})
+            say(f"Blender: {len(results)} objects imported into collection(s) {', '.join(cols)} (run tag {args.run_tag})")
         except (ConnectionRefusedError, OSError) as exc:
-            print(f"!! Blender not reachable on localhost:9876 ({exc}); meshes stay on disk")
-    print(f"done: {len(results)} meshes in {meshes_dir}")
+            say(f"!! Blender not reachable on localhost:9876 ({exc}); meshes stay on disk")
+    say(f"done: {len(results)} meshes in {meshes_dir}")
+    return results
 
 
 if __name__ == "__main__":

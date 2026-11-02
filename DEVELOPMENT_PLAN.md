@@ -726,6 +726,182 @@ T4: 0.8 cm3 coarse, ~0.25 cm3 with the rib prior, 0.09 cm3 with the atlas prior)
 (installed; without it `compare_runs.py` and `check_overlaps.py` fall back to a
 KD-tree); no automated tests, validate with `python -m compileall tools/ct`.
 
+Bone overlap check (2026-11-01/02, user: "check each bone and their neighbors to see if there is
+overlapping"): `check_overlaps.py --all-pairs` and a vertex signed-distance check both failed on
+the fused meshes (OOM at femur/hip; 16 of 329 pairs in 8 h). `tools/ct/overlap_masks.py` instead
+measures the model's masks before the joint resolution, which is where bones can actually compete
+(the resolved labels are exclusive, so the meshes cannot interpenetrate by more than the 0.5 mm
+smoothing): 55 masks, 524 pairs with meeting extents, 11 pairs share any voxel, all between
+adjacent vertebrae at the facet joints, 1-57 mm3 each (0.0-0.1% of the smaller bone), deepest
+0.85 mm (L2/L3), the rest exactly one 0.6 mm voxel. Ribs/vertebrae, sacrum/hips, hips/femora,
+sternum/clavicles/ribs share nothing. Output `RUN/nni_fused/qa/overlap_masks.json`.
+
+Muscles (2026-11-01, user: "use muscles segmentation with the same technique", "add all muscles
+you can like the bones, with the model and 3 planes information", "run each muscle in a queue, not
+parallel", "always use the highest quality source"):
+
+- `segment_nni.py --structures muscles` = the bone method on ONE merged 0.8 mm volume over both
+  acquisitions (`load_groups(merged=True)` -> group `Body`; they line up to 0.01 mm). Crops are
+  fused per acquisition and blended across the 190 mm overlap (`fuse_series.fuse_crop_multi`:
+  zero weight within 3 mm of a coverage edge, 20 mm ramp, no step at the seam).
+- Highest quality source = lowest noise for soft tissue, finest slices for bone: in muscle the
+  1 mm chest series (lung kernel) carries 35-50 HU of noise, the 3 mm soft-kernel series
+  8-10 HU, so `quality="noise"` (1 / variance) lets the soft-kernel data dominate muscles,
+  while bones keep `quality="resolution"`. User (2026-11-01): "use 3mm if its less noise for
+  soft tissues, use all 3 planes" -> the 3 mm soft-kernel chest+abdomen acquisition 401/402/403
+  (excluded for bones) is a third acquisition of the muscle volume (`--soft-tissue-series`);
+  pectoralis noise 35 -> 9 HU in the merged crop.
+- Guides: TotalSegmentator tasks `total` (gluteals, iliopsoas), `abdominal_muscles` (20 used;
+  psoas_major skipped, iliopsoas covers it), `headneck_muscles` (lower-neck muscles in field);
+  `thigh_shoulder_muscles` needs a free licence. Guides at full resolution (user: no 3 mm when
+  finer exists). Neighbours = other muscles + saved bone masks reaching into the crop (largest
+  12); bones are carved out of the muscle labels after resolution; `--measured-max-hu 0` (fat
+  plane visible = measured). Outputs `RUN/nni_fused_muscles`, collection `muscles`, tag
+  `ct2021-nni-fused-muscles`, property `ct_structure`.
+- `run_ct.py` = single entry point (guides -> bones -> muscles -> Blender), one progress line
+  per structure, model output in `OUT/qa/segment.log`; structures strictly sequential.
+- Pilot (gluteus_medius_left): 185 s, 303 cm3 (guide 302), median 59 HU, 0% fat / 0% bone
+  inside, negative prompts in hip, femur, sacrum, L5; contour follows the fat plane against
+  gluteus maximus; imported into `muscles`.
+- Full queue (2026-11-01 evening, 42 muscles sequential, ~10.7 min each): gluteals + iliopsoas
+  4-12 min, obliques 12-16 min. Interim import of the first 8 showed the left gluteus maximus
+  clipped at the lateral face of its 25 mm crop box and a step-shaped dent on the right one
+  (model patch edge, not clipping) -> both re-run with `--margin-mm 40` after the queue, then
+  `run_ct.py --skip-segment --blender` re-resolves and re-imports all muscles. Re-run result
+  (22:24-22:52): left 808 cm3, right 867 cm3, the dent is gone; the left one still ends at
+  x = 176.7 mm, which is the edge of the 601 series' reconstruction field (176.5 mm): the lateral
+  hip is cut by the scan, like the bottom at z = -370 mm, and no margin changes that. Final
+  import: 39 muscles, 6563 cm3, `ct2021-nni-fused-muscles`.
+- Result (finished 22:24, 5 h 44 min): 42/42 segmented, 6557 cm3, imported into `muscles`.
+  Largest gluteus maximus 801/868, latissimus 432/?, erector spinae 425/386, pectoralis 324 cm3.
+  Three neck-edge fragments (platysma both sides 0.0 cm3, posterior_scalene_left 0.1 cm3: the
+  scan stops at the lower neck) moved to `RUN/nni_fused_muscles/excluded/` and removed from
+  Blender -> 39 muscles kept; posterior_scalene_right (0.9) and middle_scalene_right (1.3) are
+  real stubs at the field edge. Contact report: 36 muscle-muscle interfaces, all "inferred"
+  because the interface median HU is 17-67: at 0.8 mm with the 3 mm soft-kernel data
+  dominating, a 1-2 mm fat plane blurs to +20-40 HU, so `--measured-max-hu 0` is too strict
+  for muscles; ~30 HU would call the serratus/rectus plane (17 HU) measured. Visual QA: right
+  pectoralis major has a few pinholes laterally; rectus abdominis shows boxy edges at the
+  tendinous intersections.
+- Under-segmentation found 2026-11-01 23:50 (user: "the abdominal muscles not done yet?"):
+  external_oblique 53/35 cm3 against guides of 201/176 (20-26%), rectus_abdominis 106/107
+  against 161 (66%); the masks stop at the lower belly while the guides run up to the ribs.
+  Cause: the bone rules. The model output of a sheet muscle breaks at its aponeurosis (the
+  rectus at every tendinous intersection) and `largest_component` dropped the upper pieces, and
+  the 2 positive prompts (distance-transform maxima, 20 mm apart) both sat in the thickest
+  lower belly. Fix in `segment_nni.py`: soft tissue keeps every component overlapping the guide
+  (`guided_components`, plus any >= 2% of the output) and gets 6 positive prompts spread along
+  the guide's longest extent (`--pos-points` default 6 / 2 for bones; separation
+  max(20 mm, extent / n)). The four muscles are queued for a re-run after the organ run (user's
+  choice: "queue the muscle fix after them"; chain script + log
+  `segmentation/logs/nni_abdominal_fix.log`), then all muscles re-resolve and re-import. The
+  organ run itself started under the old rules (module loaded before the edit).
+- User's later goals: discs redone with this method (seed = endplate gap of the bone masks),
+  then cartilage, ligaments and whatever else CT shows (costal cartilage, spinal cord,
+  ligamentum flavum; NOT longitudinal/interspinous ligaments or articular cartilage), each in
+  its own collection.
+
+Organs (2026-11-01, user: "can you segment the heart and lungs and internal organs?" -> "yes, add
+organs to queue, whatever you can"):
+
+- `segment_nni.py --structures organs` / `run_ct.py --structures organs`: 41 structures of
+  TotalSegmentator's free task `total` on the merged 0.8 mm volume, bone AND muscle masks as
+  neighbours and carved out; per-structure Blender collections `thorax` (10), `abdomen` (14),
+  `vessels` (16), `nervous` (spinal cord); outputs `RUN/nni_fused_organs`, tag
+  `ct2021-nni-fused-organs`. Queued behind the gluteus re-run (chain scripts in the session
+  scratchpad; log `segmentation/logs/nni_organs_queue.log`), guides included (~20 min per
+  acquisition), then ~41 x 10-25 min.
+- First 11 organs (2026-11-02 01:15, interim import, tag `ct2021-nni-fused-organs-interim`):
+  lung surfaces and the right fissures excellent; trachea 44, oesophagus 33, thyroid 19,
+  liver 1706 cm3 (guide 1860) good. Two failures of the bone rules on soft tissue (the organ run
+  loaded the module before the soft-tissue fix): heart 267 cm3 against a 576 cm3 guide (46%;
+  the 2 prompts sat in the contrast-filled left chambers and the largest component kept only
+  them) and the left lung lobes each grew over the whole left lung (upper 2455 vs guide 1322,
+  lower 2192 vs 1530; 1909 cm3 shared = 87% of the smaller; the right lobes are 0.96-1.04 of
+  their guides, so the left major fissure is simply fainter). Queued after the abdominal fix
+  (`organ_fix.sh`, log `segmentation/logs/nni_organ_fix.log`): heart + both left lobes re-run
+  with the soft-tissue rules and `--neg-points 3`, then all organs re-resolve and re-import. If
+  the lobes still overlap, split the left lung by the nearer guide label instead.
+- Full run (2026-11-02 04:06, 5 h 04 min for 41 structures, 10466 cm3 of meshes, 122 contacts
+  of which 39 measured, final import tag `ct2021-nni-fused-organs`). Mask / guide volume
+  ratios: 30 of 41 within 0.8-1.2; vessels fine after joint resolution (iliac veins 1.3-1.4
+  before, 1.08-1.19 after). Under the guide, all by the old largest-component rule on
+  structures whose model output broke into pieces: colon 0.31 (307 vs 1000 cm3), heart 0.46,
+  small_bowel 0.67, duodenum 0.67, brachiocephalic_trunk 0.67. Over: the two left lung lobes
+  (1.86 / 1.43, the fissure problem above). The queued fix (`organ_fix2.sh`, log
+  `nni_organ_fix.log`) now covers all seven: heart + left lobes with `--neg-points 3`, then the
+  four bowel / vessel structures with the default prompts, then all organs re-resolve and
+  re-import. The same ratios on the muscle run flag three more under the guide besides the four
+  abdominal ones: gluteus_minimus_right 0.60, iliopsoas_right 0.67, iliopsoas_left 0.74; they
+  follow in the same chain (stage B) and all muscles re-import. Over the guide only small neck
+  muscles at the field-of-view edge (trapezius 1.8-2.4, levator_scapulae_left 1.9,
+  middle_scalene_left 2.1): the headneck guides are cut by the scan there, left as they are.
+- Abdominal re-run (2026-11-02 05:05): external_oblique_left 229 cm3 (guide 201), right 294
+  (176), rectus_abdominis_left 168 (161), right 200 (161): the masks are complete. Two further
+  faults showed in Blender. (a) The right rectus object ended 100 mm below its mask: `mesh_bone`
+  kept only the largest piece after the Gaussian smoothing, which pinches the rectus apart at its
+  tendinous intersections, so two bellies with all their voxels present were dropped (the mesh
+  JSON volume is counted from voxels, so it never showed). Fixed: every piece with at least 1% of
+  the largest piece's area is kept (`components` in the mesh JSON); muscles re-meshed, organs
+  re-meshed at the 09:18 import, bones re-meshed 2026-11-02 13:50 (55 bones, 5 min, every bone
+  still a single piece, so nothing changed visibly). (b) Both recti end in a flat cut 85 mm above
+  the pubic crest (pubis top at z = -255 mm, recti at -171 / -156): the TotalSegmentator guide
+  stops there and the crop (guide box + 25 mm) cut the model's output at its face (mask voxels on
+  the bottom face: 1274 / 1422). Fixed by crop growth in `segment_structure`: while the mask
+  reaches a crop face that is not the scan's edge, grow 40 mm there and refine again from the
+  mask (`--grow-mm`, `--max-grow` 3 for soft tissue, 0 for bones; `grow_steps`,
+  `touches_crop_face` in the mask JSON). The recti re-run with growth right after the heart
+  (`abs_regrow.sh`, log `nni_abs_regrow.log`), then the chain continues (`organ_fix3.sh`: left
+  lobes, bowel + trunk, organs import, then gluteus_minimus_right, both iliopsoas and both
+  external obliques, muscles import). (c) The left external oblique lost 87 cm3 in the joint
+  resolution to latissimus_dorsi_left (446 vs guide 324) and serratus: contested voxels go to the
+  nearer uncontested core, which favours an over-grown neighbour. Fixed in `resolve_group`
+  (`guide_tiebreak`, soft tissue only): a contested voxel covered by exactly one of the guides
+  goes to that structure, the rest to the nearer core; takes effect at the next muscle import.
+- Rectus regrow result (2026-11-02 06:40): three grow steps each, no crop face touched at the
+  end; rectus_abdominis_left 239 cm3 (z -253..101 mm), right 243 cm3 (-241..107), both now end
+  at the pubic crest (-255) with three bellies; 28-33 min per muscle with the growth steps. The
+  guide tie-break moved the contested voxels back: external_oblique_left 141 -> 164 cm3,
+  internal_oblique_left 98 -> 121, latissimus_dorsi_left 404 -> 358, right 243 -> 299. Still
+  open: a strip of the right rectus's top belly runs laterally along the costal margin toward the
+  serratus (contact flagged measured); the heart re-run gave 493 cm3 (guide 576, was 267).
+- Organ fix result (2026-11-02 09:18, `organ_fix3.sh` A1b-A3): the left lung lobe masks still
+  overlap almost entirely (upper 2602 cm3 vs guide 1322, lower 1668 vs 1530: the model fills the
+  whole lung from either seed, 3 negative prompts did not stop it), but the joint resolution with
+  the guide tie-break splits them along TotalSegmentator's oblique fissure: meshes 1290 / 1430 cm3,
+  a clean fissure in the renders. Re-runs with the current rules: colon 1402 cm3 (guide ~1000, was
+  31%), small_bowel 615 (0.80 of guide), duodenum 69 (1.64, slightly over), brachiocephalic_trunk
+  3.2 (0.67, tiny vessel, left alone); 41 organs re-resolved, re-meshed with the multi-piece
+  mesher and re-imported (4:26). Renders in the session scratchpad `organs_qa/`.
+- Muscle fix result (2026-11-02 12:26, `organ_fix3.sh` B1-B2): gluteus_minimus_right 59 cm3 (0.80
+  of guide), iliopsoas_right 345 (0.96), iliopsoas_left 359 (0.91), external_oblique_left 200
+  (1.00, no grow needed, upper edge now at rib 8). external_oblique_right leaked: the mask reached
+  the crop's top face, the crop grew upward three times and each refinement climbed the chest wall
+  (intercostals / serratus) to the armpit: 562 cm3 (3.19 of guide, 311 after resolution, 2 h),
+  fragments up to the axilla in Blender while its real top edge is still a flat cut. Fix: a leak
+  guard in the grow loop (`--grow-max-ratio` 1.8: a grow step whose mask exceeds that multiple of
+  the guide volume is rejected and the previous mask kept; `grow_rejected` in the mask JSON); the
+  recti reached 1.48 / 1.51 with their three legitimate steps. Re-run (`eo_right_fix.sh`, log
+  `nni_eo_right_fix.log`, 13:43): the guard rejected grow step 1 (481 cm3 vs 316 allowed) and kept
+  the ungrown mask, 285 cm3 (1.62 of guide), 212 cm3 after resolution (latissimus_dorsi_right back
+  to 300); the fragments at the axilla are gone, the top edge is the guide's. Still open: a lateral
+  strip on the right rectus's top belly toward the serratus; the right external oblique's top edge
+  sits lower than the left's (rib 8) because its guide stops lower and growth is blocked there.
+- Expect: lung surfaces excellent (air boundary), fissures partly guide-driven; heart border
+  blurred by cardiac motion (not ECG-gated); bowel least reliable; mediastinum leans on the
+  soft-kernel 3 mm acquisition through the noise weighting.
+- Heart in detail (user asked for free models): TotalSegmentator `heartchambers_highres`
+  (myocardium, 4 chambers, aorta, pulmonary artery; sub-mm training) + `coronary_arteries` +
+  `aortic_sinuses` are licence-gated but free for non-commercial use (request at
+  backend.totalsegmentator.com/license-academic, `totalseg_set_license -l aca_...`; their
+  outputs may not train new models). Fully free alternatives: platipy (Apache-2.0,
+  `pip install platipy[cardiac]`, `platipy segmentation cardiac`, 18 substructures incl.
+  chambers, LAD/circumflex/left and right coronaries, 4 valves, SA/AV nodes; nnU-Net + atlas,
+  built for radiotherapy planning CT, Linux-tested), NVIDIA VISTA-3D / NV-Segment-CTMR
+  (chambers + LV myocardium among 127 classes, research use), Zenodo 11278065 (UMC Utrecht
+  nnU-Net v2 models, CC BY 4.0, 4 chambers + great vessels; model B adds valves and 4 coronary
+  segments). Any of these can seed the nnInteractive refinement as the guide.
+
 Next priorities (CT):
 
 1. Thoracic disc heights: the nnInteractive vertebra masks stop at the endplates, so

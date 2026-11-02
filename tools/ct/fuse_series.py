@@ -58,7 +58,10 @@ def resample(img, origin_lps, spacing_mm, shape_zyx, interpolator=sitk.sitkLinea
 
 def fuse_crop(series, origin_lps, spacing_mm, shape_zyx, workers=8, return_parts=False):
     """Fused HU crop (z, y, x) on the isotropic grid given by origin (LPS mm of voxel 0), spacing, shape."""
-    parts = [resample(s.img, origin_lps, spacing_mm, shape_zyx).astype(np.float32) for s in series]
+    # the series (planes) are resampled onto the crop grid in parallel; SimpleITK releases the GIL
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=min(len(series), workers)) as ex:
+        parts = list(ex.map(lambda s: resample(s.img, origin_lps, spacing_mm, shape_zyx).astype(np.float32), series))
     cover = [p > -4000 for p in parts]
     # where a reformat stack does not reach, use the axial (which defines the group's extent)
     axial = next((p for p, s in zip(parts, series) if s.normal_axis == 2), parts[0])
@@ -85,6 +88,71 @@ def fuse_crop(series, origin_lps, spacing_mm, shape_zyx, workers=8, return_parts
     fused = sfft.irfftn(F / np.maximum(W, 1e-6), s=shape_p, workers=workers)
     fused = fused[PAD:-PAD, PAD:-PAD, PAD:-PAD].astype(np.float32)
     return (fused, parts) if return_parts else fused
+
+
+def soft_tissue_noise(hu, lo=0.0, hi=100.0, min_voxels=2000):
+    """Noise (HU, robust std of the high-pass residual) inside soft tissue of a crop, or None."""
+    from scipy import ndimage as ndi
+    smooth = ndi.gaussian_filter(hu, 2.0)  # the mask comes from the smoothed image, so noise cannot break it up
+    core = ndi.binary_erosion((smooth > lo) & (smooth < hi), iterations=3)
+    if core.sum() < min_voxels:
+        return None
+    hp = (hu - ndi.gaussian_filter(hu, 3.0))[core]
+    return float(1.4826 * np.median(np.abs(hp - np.median(hp))))
+
+
+def fuse_crop_multi(series_groups, origin_lps, spacing_mm, shape_zyx, blend_mm=20.0, edge_mm=3.0,
+                    quality="resolution", workers=8):
+    """Fused crop that may span several acquisitions (e.g. the chest and the abdomen scan).
+
+    Each acquisition is fused on its own (fuse_crop) where its axial series covers the crop; where
+    acquisitions overlap they are blended with weights that rise linearly with the distance into
+    each one's coverage (from edge_mm, where the fill beyond the edge still bleeds in, to
+    edge_mm + blend_mm), so the seam is smooth and one acquisition's slice blur never enters
+    another's sharp region (a single Fourier pass over all series would do that).
+
+    The weights are scaled by each acquisition's quality so the highest quality source wins where
+    both exist and the other one only fills in where the better one has no data:
+      quality="resolution"  1 / finest slice thickness  (bones: contrast >> noise, sharpness decides)
+      quality="noise"       1 / noise variance measured in the crop's soft tissue (muscles, discs:
+                            a sharp-kernel 1 mm series with 50 HU of noise loses to a smooth 3 mm
+                            series with 8 HU; falls back to "resolution" where no soft tissue is)"""
+    from scipy import ndimage as ndi
+    fused, ramps, covers, thick, sigmas = [], [], [], [], []
+    for series in series_groups:
+        axial = next((s for s in series if s.normal_axis == 2), series[0])
+        cov = resample(axial.img, origin_lps, spacing_mm, shape_zyx) > -4000
+        if not cov.any():
+            continue
+        f = fuse_crop(series, origin_lps, spacing_mm, shape_zyx, workers=workers)  # planes in parallel inside
+        fused.append(f)
+        covers.append(cov)
+        thick.append(max(min(s.thickness for s in series), 0.1))
+        sigmas.append(soft_tissue_noise(np.where(cov, f, -1000.0)) if quality == "noise" else None)
+        ramps.append(np.ones(shape_zyx, dtype=np.float32) if cov.all() else
+                     np.clip((ndi.distance_transform_edt(cov, sampling=spacing_mm) - edge_mm) / blend_mm, 0.0, 1.0)
+                     .astype(np.float32))
+    # one quality scale for all acquisitions: noise variance when it could be measured in every one, else thickness
+    if quality == "noise" and fused and all(sg is not None for sg in sigmas):
+        qs = [1.0 / max(sg, 1.0) ** 2 for sg in sigmas]
+    else:
+        qs = [1.0 / t for t in thick]
+    weights = [r * q for r, q in zip(ramps, qs)]
+    if not fused:
+        return np.full(shape_zyx, -1000.0, dtype=np.float32)
+    if len(fused) == 1:
+        return fused[0]
+    W = np.sum(weights, axis=0)
+    out = np.sum([f * w for f, w in zip(fused, weights)], axis=0) / np.maximum(W, 1e-9)
+    # within edge_mm of every edge no acquisition has weight: take the acquisition that covers there
+    hole = W <= 0
+    if hole.any():
+        for f, cov in zip(fused, covers):
+            take = hole & cov
+            out[take] = f[take]
+            hole &= ~cov
+        out[hole] = -1000.0
+    return out.astype(np.float32)
 
 
 def estimate_shift(a, b, spacing_mm, lowpass_mm=4.0):
