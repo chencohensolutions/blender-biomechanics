@@ -17,6 +17,13 @@ Stages (each cached, so a rerun only redoes what is missing):
   4. organs   segment_nni.py --structures organs: lungs, heart, airway, oesophagus, thyroid, the
               abdominal organs, the great vessels and the spinal cord likewise, with the bone and
               muscle masks as negative prompts and carved out.
+  4b. heart   segment_nni.py --structures heart (opt-in, licensed TotalSegmentator tasks
+              heartchambers_highres / coronary_arteries / aortic_sinuses as guides): myocardium,
+              four chambers, ascending aorta, pulmonary artery, coronaries and the aortic cusps on
+              a 0.6 mm crop, into collection `heart`.
+  4c. discs   segment_nni.py --structures discs (opt-in, licensed task vertebrae_body): its one
+              intervertebral_discs label split per disc by the refined vertebrae (split_discs.py),
+              each refined on a 0.6 mm crop with the vertebrae as negatives, into collection `discs`.
   5. blender  meshes imported into the running Blender (BlenderMCP, localhost:9876): bones into
               collection `bones`, muscles into `muscles`, organs into `thorax` / `abdomen` /
               `vessels` / `nervous`, replacing earlier runs' objects.
@@ -40,8 +47,11 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import pipeline  # noqa: E402
 import segment_nni  # noqa: E402
+import split_discs  # noqa: E402
 
 MUSCLE_TASKS = {"total": segment_nni.MUSCLES_TOTAL, "abdominal_muscles": None, "headneck_muscles": None}
+# licensed heart tasks (totalseg_set_license): task -> label renames (heartchambers' aorta must not replace total's)
+HEART_TASKS = {"heartchambers_highres": {"aorta": "heart_aorta"}, "coronary_arteries": {}, "aortic_sinuses": {}}
 
 
 def hms(sec):
@@ -70,8 +80,13 @@ def run_guides(groups, structures, device, fast, log):
             jobs.append(("headneck_muscles", None, fast))
         if "organs" in structures:
             jobs.append(("total", segment_nni.ORGANS, False))
+        if "heart" in structures:
+            jobs += [(task, None, False) for task in HEART_TASKS]
+        if "discs" in structures:
+            jobs.append(("vertebrae_body", None, False))
         for task, classes, use_fast in jobs:
-            wanted = classes if classes else task_classes(task)
+            rename = HEART_TASKS.get(task, {})
+            wanted = [rename.get(c, c) for c in (classes if classes else task_classes(task))]
             missing = [c for c in wanted if not (ts_dir / f"{c}.nii.gz").exists()]
             if not missing:
                 log(f"  guides {g['name']}/{task}: {len(wanted)} labels cached")
@@ -85,25 +100,43 @@ def run_guides(groups, structures, device, fast, log):
                 cmd = [str(exe), "-i", str(axial), "-o", str(out_dir), "--task", task, "--device", device]
             if use_fast:
                 cmd.append("--fast")
-            log(f"  guides {g['name']}/{task}: {len(missing)} labels to compute{' (fast 3 mm)' if use_fast else ''} ...")
-            res = subprocess.run(cmd, capture_output=True, text=True)
-            if res.returncode != 0:
-                log(f"!! TotalSegmentator {task} on {g['name']} failed: {(res.stderr or res.stdout).strip().splitlines()[-1]}")
-                continue
+            if out_dir != ts_dir and any(out_dir.glob("*.nii.gz")):
+                log(f"  guides {g['name']}/{task}: task folder exists, copying its labels")
+            else:
+                log(f"  guides {g['name']}/{task}: {len(missing)} labels to compute{' (fast 3 mm)' if use_fast else ''} ...")
+                res = subprocess.run(cmd, capture_output=True, text=True)
+                if res.returncode != 0:
+                    log(f"!! TotalSegmentator {task} on {g['name']} failed: {(res.stderr or res.stdout).strip().splitlines()[-1]}")
+                    continue
             if out_dir != ts_dir:
                 for f in out_dir.glob("*.nii.gz"):
-                    if not (ts_dir / f.name).exists():  # trapezius exists in two tasks: first one wins
-                        (ts_dir / f.name).write_bytes(f.read_bytes())
+                    name = rename.get(f.name[:-7], f.name[:-7]) + ".nii.gz"
+                    if not (ts_dir / name).exists():  # trapezius exists in two tasks: first one wins
+                        (ts_dir / name).write_bytes(f.read_bytes())
             log(f"  guides {g['name']}/{task}: done in {hms(time.time() - t0)}")
+        if "discs" in structures and (ts_dir / "intervertebral_discs.nii.gz").exists():
+            if any(ts_dir.glob("disc_*.nii.gz")):
+                log(f"  guides {g['name']}/discs: per-disc labels cached")
+            else:
+                log(f"  guides {g['name']}/discs: splitting intervertebral_discs by the refined vertebrae")
+                try:
+                    split_discs.split(ts_dir / "intervertebral_discs.nii.gz", Path(g["totalseg"]).parents[1] / "nni_fused" / "masks",
+                                      ts_dir, log=log)
+                except RuntimeError as exc:
+                    log(f"!! discs on {g['name']}: {exc}")
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--run", required=True, help="pipeline run folder (run.json, series/, totalseg/)")
-    ap.add_argument("--structures", nargs="+", choices=["bones", "muscles", "organs"], default=["bones", "muscles", "organs"])
+    ap.add_argument("--structures", nargs="+", choices=["bones", "muscles", "organs", "heart", "discs"],
+                    default=["bones", "muscles", "organs"],
+                    help="heart (chambers, coronaries, cusps) and discs need the licensed tasks and the refined bones")
     ap.add_argument("--bones", nargs="+", default=["all"], help="bone names or 'all'")
     ap.add_argument("--muscles", nargs="+", default=["all"], help="muscle names or 'all'")
     ap.add_argument("--organs", nargs="+", default=["all"], help="organ / vessel names or 'all'")
+    ap.add_argument("--heart", nargs="+", default=["all"], help="heart part names or 'all'")
+    ap.add_argument("--discs", nargs="+", default=["all"], help="disc names (disc_T7_T8) or 'all'")
     ap.add_argument("--atlas-labels", help="fitted atlas labels used where TotalSegmentator has no bone label "
                                            "(default RUN/atlas_bp3d/labels when it exists)")
     ap.add_argument("--group-override", nargs="*", default=["rib_right_11=Lung"], metavar="BONE=GROUP")
@@ -172,6 +205,20 @@ def main(argv=None):
     else:
         log("\n[4/5] organs: skipped")
 
+    # 4b. heart in detail
+    if "heart" in args.structures:
+        log("\n[4b/5] heart: nnInteractive on the fused volume (0.6 mm), bones / muscles / surrounding organs carved out")
+        t0 = time.time()
+        argv_h = common + ["--structures", "heart", "--bones", *args.heart, "--run-tag", args.run_tag + "-heart"]
+        summary["heart"] = (segment_nni.main(argv_h) or {}, time.time() - t0)
+
+    # 4c. intervertebral discs
+    if "discs" in args.structures:
+        log("\n[4c/5] discs: nnInteractive on the fused volume (0.6 mm), vertebrae carved out")
+        t0 = time.time()
+        argv_d = common + ["--structures", "discs", "--bones", *args.discs, "--run-tag", args.run_tag + "-discs"]
+        summary["discs"] = (segment_nni.main(argv_d) or {}, time.time() - t0)
+
     # 5. summary
     log(f"\n[5/5] summary ({hms(time.time() - t_all)} total)")
     for kind, (results, sec) in summary.items():
@@ -183,7 +230,7 @@ def main(argv=None):
         log(f"  {kind}: {len(results)} meshes, {vol:.0f} cm^3, {len(contacts)} contacts "
             f"({measured} measured / {len(contacts) - measured} inferred), {hms(sec)}  -> {out / 'meshes'}")
     if args.blender:
-        log("  Blender: objects replaced in collections bones / muscles / thorax, abdomen, vessels, nervous; "
+        log("  Blender: objects replaced in collections bones / muscles / thorax, abdomen, vessels, nervous / heart / discs; "
             "the .blend was saved by the import")
     else:
         log("  Blender: not touched (add --blender)")

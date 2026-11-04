@@ -890,6 +890,59 @@ organs to queue, whatever you can"):
 - Expect: lung surfaces excellent (air boundary), fissures partly guide-driven; heart border
   blurred by cardiac motion (not ECG-gated); bowel least reliable; mediastinum leans on the
   soft-kernel 3 mm acquisition through the noise weighting.
+- Heart and discs stages (2026-11-03): the user obtained the TotalSegmentator non-commercial
+  licence (all 16 gated tasks; key stored with `totalseg_set_license`, config in
+  ~/.totalsegmentator). `run_ct.py --structures heart`: tasks heartchambers_highres (its aorta
+  stored as heart_aorta so total's aorta survives), coronary_arteries, aortic_sinuses on both
+  acquisitions' finest axial series (2 min per task on MPS), then `segment_nni.py --structures
+  heart`: 12 parts on 0.6 mm crops, resolution-weighted fusion, bones + muscles + the organ masks
+  around the heart as negatives / carve but not the organ run's heart, atrial_appendage_left and
+  aorta (HEART_ENVELOPE), collection `heart`, run tag ct2021-nni-fused-heart. The Delayed
+  acquisition ends at z = 134 mm (mid-ventricle), so its heart labels are the lower half only;
+  the Lung acquisition covers the whole heart and the guide union across acquisitions is used.
+  `--structures discs`: task vertebrae_body (vertebrae_body + one intervertebral_discs label),
+  split per disc by `split_discs.py` (each label piece -> the refined vertebrae nearest above and
+  below its centroid; disc_C2_C3 ... disc_L5_S1; C1/C2 pieces skipped), refined like the heart
+  with the vertebra masks as negatives / carve, collection `discs`. Queue: heart parts, then
+  discs (`heart_then_discs.sh`, log `nni_heart_discs.log`). User's order for what follows:
+  lung airways + vessels (free task lung_vessels), shoulder muscles (thigh_shoulder_muscles),
+  fat compartments / skin (tissue_4_types).
+- Heart result (2026-11-03, 11:51-16:13, 4:22 h; 12 parts, 680 cm3): myocardium 116, left
+  ventricle 130, right ventricle 107 (123 raw), left atrium 69 (79 raw), right atrium 40 (52
+  raw), heart_aorta 136 (arch + descending to the diaphragm), pulmonary artery 74 (with both
+  main branches), coronaries 1.9 (5 pieces, proximal segments only; the guide had 0.6),
+  outflow tract 4.0, cusps 0.6 / 1.8 / 1.6 cm3. The first resolve meshed 11 parts: the right
+  coronary cusp lies wholly inside the aorta mask and the nearer-core rule gave it, and most of
+  the other cusps and the outflow tract, to the aorta. Fix: `NESTED["heart"]` parts keep their
+  contested voxels (resolve_group `priority`), and a part without an uncontested core uses its
+  own mask as the core; re-resolved with `--skip-segment` (2 min), 12 parts in collection
+  `heart`. Stray pieces: a small aorta fragment above the arch (2 components) and a few
+  coronary specks; none were fixed. Median HU: chambers 158-326 (contrast), myocardium 69.
+- Discs result (16:13-17:15, 55 min; 18 discs C7/T1 to L5/S1, 56 cm3): the label pieces fell
+  between consecutive vertebrae every time (15 on Lung, 9 on Delayed, union 18; the scan has
+  no cervical discs above C7). Lumbar discs are right (L4/L5 10.2 cm3, 14.7 cm2 footprint,
+  7 mm thick, 90 % inside the inter-body gap) but the thoracic discs filled only a quarter of
+  the gap (T4/T5 0.6 cm3 in a 2.4 cm3 gap, 2.5 of 8 cm2 footprint): the vertebrae_body disc
+  label marks only the centre of a thin disc and the refinement stayed on it. Fix:
+  `split_discs.fill_gap` grows each guide into the inter-body gap (see README); the full
+  re-run D2 (`discs_refill.sh`, log `nni_discs_refill.log`, 17:23-19:00) replaced the 18.
+- Discs D2 outcome (19:00-21:30, masks post-processed with `--skip-segment` re-resolves, 2 min
+  each, no re-segmentation): two discs leaked up the spinal canal on the first pass (T2/T3 and
+  T4/T5: 15 cm3, median 30 HU, against a 1 cm3 guide; the grow guard only checked grow steps),
+  and the thin thoracic discs stayed under their guide (T6/T7 1.1 of 1.7 cm3, median 159 HU:
+  the model follows the endplate rim). Added `finish_mask` in segment_nni: first-pass leak clip
+  (mask > 1.8x guide -> guide + 3 mm) for all soft tissue, and for `GUIDE_IS_SPACE` kinds
+  (discs) clip to 1 mm around the guide + union with it. The gap fill itself needed four rules
+  before the renders were clean: bodies only bound the gap (`vertebrae_body` label), at least
+  6 mm of both bodies in a column, no rib head in the gap (costovertebral joint), and a slab of
+  half the typical gap + 1.5 mm around the fitted mid-plane (without these a column grazing the
+  concave posterior wall or a demifacet filled 8-10 mm of canal / joint space as a wedge hanging
+  off the posterolateral corner). Final meshes: C7/T1 0.9, T1/T2 1.0, T2/T3 0.8, T3/T4 0.7,
+  T4/T5 0.7, T5/T6 0.9, T6/T7 1.1, T7/T8 1.4, T8/T9 1.7, T9/T10 1.5, T10/T11 2.6, T11/T12 3.2,
+  T12/L1 4.6, L1/L2 5.9, L2/L3 8.7, L3/L4 9.1, L4/L5 9.7, L5/S1 5.0 cm3 (mid-thoracic discs
+  3 mm thick in this subject; no column over 7 mm). Renders in the session scratchpad
+  `heart_discs_qa10/`. `discs_finish.py` (scratchpad) applies finish_mask to saved masks when
+  only the post-processing changes.
 - Heart in detail (user asked for free models): TotalSegmentator `heartchambers_highres`
   (myocardium, 4 chambers, aorta, pulmonary artery; sub-mm training) + `coronary_arteries` +
   `aortic_sinuses` are licence-gated but free for non-commercial use (request at
@@ -904,12 +957,10 @@ organs to queue, whatever you can"):
 
 Next priorities (CT):
 
-1. Thoracic disc heights: the nnInteractive vertebra masks stop at the endplates, so
-   re-run `extract_discs.py` on the new bones and check whether the thoracic discs
-   (1.5-2.5 mm before, real 4-7 mm) now measure. `extract_discs.py` currently reads the
-   previous method's `basins_file` masks and `fused/` volumes; the `RUN/nni_fused/meshes/`
-   JSONs carry neither, so it first needs a path that reads `RUN/nni_fused/masks/`
-   (0.6 mm isotropic crops) and the fused crop from `fuse_series.fuse_crop`.
+1. Thoracic disc heights: now measured by the discs stage (`--structures discs`, collection
+   `discs`) rather than `extract_discs.py`; this subject's mid-thoracic inter-body gaps are
+   3-4.5 mm (T4/T5 3.0, T6/T7 4.5 mm mean), the lumbar ones 7-8 mm. Compare the D2 disc
+   volumes with the gap volumes (`disc inside gap` check in the session notes) after the re-run.
 2. Muscles from the MyoSuite BodyParts3D-derived set.
 3. A second scan compared with `compare_runs.py` against `RUN/nni_fused/meshes`.
 

@@ -379,6 +379,35 @@ What differs from the bones:
   neighbour (the right external oblique climbed the chest wall to the armpit) and is rejected:
   the previous mask is kept. The mask JSON records `grow_steps`, `grow_rejected` and
   `touches_crop_face`.
+- Heart in detail (`--structures heart`, opt-in). Guides from the licence-gated TotalSegmentator
+  tasks `heartchambers_highres` (myocardium, four chambers, ascending aorta stored as
+  `heart_aorta`, pulmonary artery), `coronary_arteries` and `aortic_sinuses` (outflow tract, three
+  cusps), run on each acquisition's finest axial series (`totalseg_set_license -l aca_...` once;
+  free for non-commercial use). The parts are refined on a 0.6 mm crop with resolution-weighted
+  fusion (contrast-filled chambers, 2-4 mm coronaries), with the bones, muscles and the organ masks
+  around the heart as negative prompts and carve, but not the organ run's own `heart`,
+  `atrial_appendage_left` and `aorta`, which they lie inside. Parts that lie inside another part
+  (the three cusps in the aortic root, the outflow tract, the coronaries on the myocardium) keep
+  every voxel they claim when the masks are resolved (`NESTED`); the nearer-core rule alone gave
+  them to the aorta, which has the only uncontested core. Output `RUN/nni_fused_heart`,
+  Blender collection `heart`, run tag `ct2021-nni-fused-heart`.
+- Intervertebral discs (`--structures discs`, opt-in, licensed task `vertebrae_body`). Its single
+  `intervertebral_discs` label is split per disc by `tools/ct/split_discs.py`: each label piece is
+  named after the refined vertebrae nearest above and below its centroid (`disc_T7_T8`,
+  `disc_L5_S1`; pieces between C1 and C2 or beyond the segmented spine are skipped), then grown
+  into the gap between those two vertebra masks, because the label covers only the centre of a
+  thin thoracic disc (T4/T5: 0.4 cm3 in a 2.4 cm3 gap). The fill takes the columns within 8 mm
+  of the piece's footprint that pass through at least 6 mm of both vertebral bodies (the task's
+  `vertebrae_body` label bounds the gap, not the arch), with a gap of at most 12 mm, no rib head
+  in the gap (the costovertebral joint), and keeps only a slab of half the typical gap + 1.5 mm
+  around the disc's fitted mid-plane (a column grazing the concave posterior wall or a demifacet
+  otherwise runs on down the canal). The discs are refined like the heart on 0.6 mm crops with
+  every bone as negative and carved out; afterwards the mask is clipped to 1 mm around that
+  guide and unioned with it (`GUIDE_IS_SPACE`, `--space-clip-mm`): the model follows the dense
+  endplate rim of a 3 mm disc and leaves the gap half empty, and two discs ran 15 cm3 up the
+  spinal canal. A first-pass mask over `--grow-max-ratio` x the guide is clipped to the guide +
+  `--leak-clip-mm` for every soft-tissue kind. Output `RUN/nni_fused_discs`, collection `discs`,
+  run tag `ct2021-nni-fused-discs`.
 - Meshes keep every piece of real size (area at least 1% of the largest piece): the Gaussian
   smoothing pinches a label apart where it is thin, and the earlier largest-piece rule dropped the
   upper two bellies of a rectus whose voxels were all there (mesh JSON `components`).
