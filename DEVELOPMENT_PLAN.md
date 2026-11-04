@@ -943,6 +943,20 @@ organs to queue, whatever you can"):
   3 mm thick in this subject; no column over 7 mm). Renders in the session scratchpad
   `heart_discs_qa10/`. `discs_finish.py` (scratchpad) applies finish_mask to saved masks when
   only the post-processing changes.
+- Method summary (2026-11-04): README "How the high-detail segments are made" is the one-page
+  recipe behind every structure in the scene (every series at its own resolution, Fourier
+  fusion of the three planes, TotalSegmentator guide, nnInteractive refinement on a fused crop
+  with growth and leak guards, one-grid resolution with guide / nested / nearer-core rules,
+  sub-voxel meshing keeping every real piece, import by name at scanner position). Point a
+  new reader there first; the per-stage blocks above are the evidence.
+- Scene export (2026-11-04): `tools/ct/export_gltf.py` wrote `<segmentation>/exports/`:
+  ct2021_all.glb 370 MiB (166 meshes, 17.6 M faces, uncompressed), ct2021_all_draco.glb
+  39 MiB, and the group files skeleton 20 MiB (75 meshes), muscles 19 MiB (39), organs 14 MiB
+  (52) that fit the 30 MiB chat upload limit. The scene keeps collection `thorax` excluded from
+  the view layer and `spinal_cord` hidden; the tool includes both for the export and restores
+  them, and skips the organ run's one-body `heart` (the 12-part heart replaces it, the
+  `atrial_appendage_left` from that run is kept). Object colours are baked into `glb_<name>`
+  materials, which stay on the meshes after the export.
 - Heart in detail (user asked for free models): TotalSegmentator `heartchambers_highres`
   (myocardium, 4 chambers, aorta, pulmonary artery; sub-mm training) + `coronary_arteries` +
   `aortic_sinuses` are licence-gated but free for non-commercial use (request at

@@ -142,7 +142,74 @@ uv pip install --python .venv/bin/python totalsegmentator SimpleITK scipy nibabe
 - `check_overlaps.py`: second-pass QA of neighbouring bones: overlap, split disagreement, penetration, joint gap (the mesh pass needs more memory than the fused run's meshes allow).
 - `overlap_masks.py RUN OUT.json`: bone-to-bone overlap of the model masks before the joint resolution (shared voxels, mm3, depth inside both bones) for every pair whose extents meet. On the fused run 11 of 524 pairs share voxels, all facet joints of adjacent vertebrae, at most 0.85 mm deep; the resolved meshes cannot interpenetrate beyond the 0.5 mm smoothing.
 - `resegment_pairs.py` (previous method): consistency pass: re-cuts neighbouring pairs with one shared decision per voxel, so both surfaces meet on one boundary.
+- `export_gltf.py`: the open scene as GLB files (whole scene and per-group Draco files, viewport colours baked into materials) through the BlenderMCP socket (see Exporting the scene).
 - `extract_discs.py`: every intervertebral disc between consecutive vertebra meshes (C7-T1 ... L5-sacrum) from the fused CT: one mesh and one parameter JSON per level, and with `--blender` a centre Empty carrying the parameters for a disc force model. It reads the previous method's masks (`basins_file`) and `fused/` volumes.
+
+### How the high-detail segments are made (method summary)
+
+Every structure in `spine/ct_bones.blend` (166 meshes on 2026-11-04: 55 bones, 18 discs,
+2 costal cartilages, 39 muscles, 52 organs, vessels and heart parts) comes from one recipe.
+The sections that follow hold the evidence and the parameters; this is the recipe.
+
+1. **Use every series the scanner exported, at its own resolution.** The 2021 scan has
+   thin axial series only for the chest (404, 1 mm); the abdomen's axial slices are 3 mm.
+   But the coronal and sagittal reformats were built from the 0.625 mm raw reconstruction,
+   so along the body axis they are sharper than the axial series. Bones, heart and discs
+   use the finest acquisition that covers them (chest 404 + 406, abdomen 601 + 602 + 603)
+   and never the 3 mm CHEST+ABD soft-kernel series; muscles and organs add that series
+   because it has a quarter of the noise (8-10 against 35-50 HU).
+2. **Recover isotropic resolution by fusing the three planes** (`fuse_series.py`). The
+   axial, coronal and sagittal series of one acquisition are combined in the Fourier
+   domain on a 0.6 mm isotropic grid (0.8 mm for the merged body volume of the muscles and
+   organs): each spatial frequency is taken from the series that measured it, weighted by
+   exp(-2 (f_n t)^2) along every series' slice normal, so nothing is sharpened beyond what
+   some series recorded. Where acquisitions overlap, the finer slices win for bone (weight
+   1 / thickness) and the quieter series wins for soft tissue (1 / noise variance), blended
+   over a 20 mm ramp so no seam shows.
+3. **Seed every structure with a coarse guide from TotalSegmentator**, run on each
+   acquisition's finest axial series: the free task `total` (bones, organs, vessels,
+   gluteals, iliopsoas), the muscle tasks `abdominal_muscles` and `headneck_muscles`, and
+   the licensed tasks `heartchambers_highres`, `coronary_arteries`, `aortic_sinuses` and
+   `vertebrae_body` (free non-commercial licence). The guide only says where and roughly
+   what; its surface is never used. For the discs the single `intervertebral_discs` label is
+   split per level and filled out to the inter-body gap first (`split_discs.py`).
+4. **Refine each structure alone with nnInteractive on a fused crop** (`segment_nni.py`):
+   the crop is the guide's box plus 25 mm; the guide is the initial segmentation; positive
+   prompts go deep inside it (two for a bone, six spread along a muscle), negative prompts
+   into each neighbour; a bone keeps its largest connected component, soft tissue every
+   component that overlaps the guide. A soft-tissue crop grows by 40 mm wherever the mask
+   reaches its face (up to three times), a grow step that balloons past 1.8 x the guide is
+   rejected, a first-pass mask that does so is clipped to the guide + 3 mm, and a disc is
+   clipped to 1 mm around its gap guide and unioned with it.
+5. **Resolve all structures of a group on one label grid** (`resolve_group`), instead of
+   reconciling pairs: a voxel claimed by one structure is its; a contested voxel goes to the
+   one guide that covers it (soft tissue), is kept by a nested part (cusps, outflow tract,
+   coronaries inside the aorta), or else goes to the structure whose uncontested core is
+   nearer. Bones are then carved out of every soft tissue, muscles out of organs, and a
+   finer acquisition's bone out of a coarser one's neighbour.
+6. **Mesh at sub-voxel precision and keep every real piece** (`mesh_bone`): 0.5 mm Gaussian
+   smoothing of the mask, 0.5 iso-surface, 10 Taubin iterations, every piece with at least
+   1 % of the largest piece's area; PLY/STL in Blender metres (LPS mm x 0.001, scanner
+   origin kept) with a JSON per mask and mesh (volume, median HU, neighbours, grow steps,
+   clips) and a contact report that marks each interface measured or inferred.
+7. **Import by name, never move, never reshape.** Each mesh replaces the same-named object
+   in its collection with `ct_*` properties for the run, series and voxel size; the atlas
+   serves naming and QA only. Structures run one at a time (bones 80 min, muscles 5 h 44,
+   heart 4 h 22, discs 55 min on an Apple M5) and every mask is cached, so a rule change
+   re-resolves and re-imports a set in about two minutes (`--skip-segment`).
+
+### Exporting the scene (glTF)
+
+`tools/ct/export_gltf.py OUT_DIR` writes the open scene as GLB through the BlenderMCP
+socket: `ct2021_all.glb` (uncompressed, ~370 MiB), `ct2021_all_draco.glb` (~39 MiB) and
+three Draco group files under the 30 MiB chat upload limit, `ct2021_skeleton_draco.glb`
+(bones, discs, cartilage), `ct2021_muscles_draco.glb` and `ct2021_organs_draco.glb`
+(abdomen, thorax, vessels, spinal cord, 12-part heart). Each object's viewport colour is
+baked into a material; collections excluded from the view layer (`thorax`) are included
+for the export, hidden objects (`spinal_cord`) are unhidden, and both are restored; the
+organ run's one-body `heart` is skipped because the heart collection replaces it. All
+files share the scanner frame (metres, +Y up in glTF). The 2026-11-04 export lives in
+`<segmentation>/exports/`.
 
 ### Resolution of the 2021 scan
 
