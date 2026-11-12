@@ -109,3 +109,8 @@ makes no clinical claims.
 - [AGENTS.md](AGENTS.md): rules for AI coding agents working in this repository.
 - [MUSCLE_ATTACHMENTS.md](MUSCLE_ATTACHMENTS.md) and [BONE_NEAREST_NEIGHBORS.md](BONE_NEAREST_NEIGHBORS.md):
   anatomy reference data.
+
+## License
+
+Free for noncommercial use under the [PolyForm Noncommercial License 1.0.0](LICENSE.md). For commercial use, ask for a
+separate license. Third-party code, models and data keep their own licenses.
